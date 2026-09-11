@@ -1,7 +1,7 @@
 using System.Collections;
 using SpaceAutomation.Game;
 using SpaceAutomation.Persistence;
-
+using System.Numerics;
 namespace SpaceAutomation.Server;
 
 // Immutable snapshot served by GET /state: the world as one published value.
@@ -21,6 +21,11 @@ public static class StateProjection
         var ordered = world.Objects.Values.OrderBy(obj => obj.Id, StringComparer.Ordinal);
         foreach (var obj in ordered)
         {
+            if (!obj.IsPlayerVisible)
+            {
+                continue; // e.g. a mineral nobody has scanned yet: in the save, not in the API
+            }
+
             objects.Add(Project(obj));
         }
 

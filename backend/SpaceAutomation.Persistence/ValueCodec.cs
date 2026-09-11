@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SpaceAutomation.Game;
+using System.Numerics;
 namespace SpaceAutomation.Persistence;
 
 public static class ValueCodec
@@ -175,10 +176,6 @@ public static class ValueCodec
             float x = xNode.Deserialize<float>();
             float y = yNode.Deserialize<float>();
             var v = new Vector2(x, y);
-            if (!v.IsFinite)
-            {
-                throw new InvalidDataException("Nonfinite vector");
-            }
             return v;
         }
         if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))

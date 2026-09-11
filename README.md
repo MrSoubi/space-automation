@@ -21,7 +21,7 @@ The launcher builds if needed, then runs `backend/SpaceAutomation.Server`. Optio
 
 | Option | Meaning |
 | --- | --- |
-| `--save path` | Save file (default `.space-automation/world-host.json`). |
+| `--save path` | Save file (default `~/.space-automation/world-host.json`, shared by every launch method). |
 | `--port n` | Port to serve on (default 8377, localhost only). |
 | `--paused` | Start paused. |
 
@@ -68,11 +68,11 @@ No `Content-Type` header is needed; `curl -d` just works.
 read /state  ->  decide  ->  POST commands  ->  repeat
 ```
 
-At one tick per second, a client that polls a few times per second never misses a tick — but if it does (slow code, breakpoints), the world moves on without it. There is no in-game runtime: your program is the runtime, in whatever language you like. `player/main.py` is a complete dependency-free example.
+At one tick per second, a client that polls a few times per second never misses a tick — but if it does (slow code, breakpoints), the world moves on without it. There is no in-game runtime: your program is the runtime, in whatever language you like. The Python side ships `player/api.py`, a small dependency-free client library — `Game`, a `ticks()` loop, live object views — and `player/main.py`, a behavior example built on it.
 
 ## Persistence
 
-The world autosaves every tick and on exit (atomic writes). Corrupt or unsupported saves are reported, never overwritten. A missing save file creates the starter scenario. Restarts resume from the last tick.
+The world autosaves every tick and on exit (atomic writes). A missing save file creates the starter scenario; a save this version cannot read (an older world model, a broken file) is kept aside as `<save>.broken-<timestamp>` and a fresh expedition starts, with a message explaining what happened. Restarts resume from the last tick.
 
 ## Project layout
 
@@ -81,7 +81,7 @@ The world autosaves every tick and on exit (atomic writes). Corrupt or unsupport
 | `backend/SpaceAutomation.Game` | Authoritative domain: world, clock, rovers, energy system. No I/O. |
 | `backend/SpaceAutomation.Persistence` | Save/load: `[GameType]`/`[Observed]`/`[Saved]` metadata, JSON codec, migrations. |
 | `backend/SpaceAutomation.Server` | The application: game loop, call channel, HTTP API on localhost. |
-| `player/main.py` | Reference client; rewrite or replace in any language. |
+| `player/api.py` + `player/main.py` | The Python starter: a small client library and an example behavior on top of it. Rewrite or replace in any language. |
 | `SpaceAutomation/` | Design notes and journals. |
 
 Attributes exist only in the persistence layer; reads are projected mechanically from `[Observed]` metadata, while commands are hand-written routes in `SpaceAutomation.Server/ServerApi.cs` — the same capability set for every client.

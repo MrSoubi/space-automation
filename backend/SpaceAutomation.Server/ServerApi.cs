@@ -1,13 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using SpaceAutomation.Game;
-using SpaceAutomation.Game.Objects;
-
+using SpaceAutomation.Game.Items;
+using SpaceAutomation.Game.Vehicles;
+using System.Numerics;
 namespace SpaceAutomation.Server;
 
 // The player-facing HTTP surface: the whole game. Reads serve the published
@@ -38,6 +34,7 @@ public static class ServerApi
         app.MapGet("/state", () => GetState(session));
         app.MapGet("/objects/{id}", (string id) => GetObject(session, id));
         app.MapPost("/objects/{id}/move", (string id, HttpContext context) => MoveRover(session, id, context));
+        app.MapPost("/objects/{id}/scan", (string id) => ScanScanner(session, id));
         app.MapPost("/session/pause", () => PauseSession(session));
         app.MapPost("/session/resume", () => ResumeSession(session));
         app.MapPost("/session/step", () => StepSession(session));
@@ -105,7 +102,7 @@ public static class ServerApi
         // Look up the object and execute its command together on the game thread.
         return await session.Call<IResult>(world =>
         {
-            GameObject? obj = world.Find<GameObject>(id);
+            GameObject? obj = world.Find(id);
             if (obj is null)
             {
                 return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
@@ -118,6 +115,28 @@ public static class ServerApi
             }
 
             CommandResult result = rover.Move(direction, speed);
+            return Results.Json(result, Json);
+        });
+    }
+
+    private static async Task<IResult> ScanScanner(GameSession session, string id)
+    {
+        // Look up the object and execute its command together on the game thread.
+        return await session.Call<IResult>(world =>
+        {
+            GameObject? obj = world.Find(id);
+            if (obj is null)
+            {
+                return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
+            }
+
+            SurveyScanner? scanner = obj as SurveyScanner;
+            if (scanner is null)
+            {
+                return Results.Json(CommandResult.Reject("unsupported_object"), Json, statusCode: 400);
+            }
+
+            CommandResult result = scanner.Scan();
             return Results.Json(result, Json);
         });
     }

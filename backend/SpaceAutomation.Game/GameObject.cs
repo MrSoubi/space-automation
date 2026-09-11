@@ -1,4 +1,5 @@
 namespace SpaceAutomation.Game;
+using System.Numerics;
 
 public abstract class GameObject
 {
@@ -37,9 +38,12 @@ public abstract class GameObject
 
     public virtual void Update() { }
 
+    // Whether this object appears in the player-facing state. Most objects do;
+    // an undiscovered mineral, for example, stays hidden until a scan finds it.
+    public virtual bool IsPlayerVisible => true;
+
     public virtual void ValidateState()
     {
         Rules.Require(!string.IsNullOrWhiteSpace(Id), "Object needs an id");
-        Rules.Require(Position.IsFinite, "Position must be finite");
     }
 }

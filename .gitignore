@@ -1,6 +1,7 @@
 # Build artifacts
 **/bin/
 **/obj/
+__pycache__/
 
 # Local game saves
 .space-automation/

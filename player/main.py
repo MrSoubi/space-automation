@@ -1,79 +1,62 @@
 #!/usr/bin/env python3
-"""Space Automation reference client.
+"""Space Automation player script: the fun part.
 
-The game is an HTTP API: this file is just one way to play it, in plain
-Python with no dependencies. Rewrite it in any language — the server treats
-every client equally.
-
-The canonical loop: read /state, decide, submit commands. Commands answer
-immediately ({accepted: true} or {accepted: false, reason: "..."}), but their
-effects happen over simulation time. The server ticks once per second and
-never waits for this program: if we are slow, we simply miss ticks.
+Transport lives in api.py; this file is pure behavior — survey the sector,
+then drive the rover to the first mineral the scan reveals. Replace it with
+whatever you are actually trying to accomplish.
 """
 
-import json
-import time
-import urllib.error
-import urllib.request
+import math
 
-SERVER = "http://127.0.0.1:8377"
-POLL_SECONDS = 0.25
-
-
-def get(path):
-    with urllib.request.urlopen(SERVER + path, timeout=5) as response:
-        return json.load(response)
-
-
-def post(path, body):
-    request = urllib.request.Request(
-        SERVER + path,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        # 404 unknown object, 400 unsupported command or malformed body.
-        return json.load(error)
-
-
-def objects_of_type(state, type_name):
-    return [obj for obj in state["objects"] if obj["type"] == type_name]
-
-
-def command(path, body):
-    result = post(path, body)
-    if not result.get("accepted"):
-        print(f"rejected {path}: {result.get('reason')}")
-    return result
+from api import Game
 
 
 def main():
-    print(f"connecting to {SERVER}")
-    last_tick = None
+    game = Game()
+    print(f"connected — tick {game.state['tick']}, {len(game.state['objects'])} visible objects")
 
-    while True:
-        state = get("/state")
+    for state in game.ticks():
+        rover = game.object("rover-1")
+        scanner = game.object("scanner-1")
 
-        if state["tick"] != last_tick:
-            last_tick = state["tick"]
-            print(f"tick {state['tick']} — {len(state['objects'])} objects")
+        if rover is None or scanner is None:
+            print("this script expects rover-1 and scanner-1 (start a fresh save to get them)")
+            return
 
-        # Example autopilot: drive the first rover east at half speed.
-        # Replace this with whatever you are actually trying to accomplish.
-        rovers = objects_of_type(state, "rover")
+        # Phase 1: survey the sector once, then wait for the scan to finish.
+        if not scanner.scanned:
+            if scanner.ticks_remaining == 0:
+                print(f"tick {state['tick']}: starting a survey scan")
+                game.scan(scanner.id)
 
-        if rovers:
-            rover = rovers[0]
-            command(
-                f"/objects/{rover['id']}/move",
-                {"direction": {"x": 1, "y": 0}, "speed": rover["max_speed"] / 2},
-            )
+            continue
 
-        time.sleep(POLL_SECONDS)
+        # Phase 2: drive to the first mineral the scan revealed.
+        minerals = game.objects("mineral")
+
+        if not minerals:
+            print(f"tick {state['tick']}: the scan found nothing — nothing to drive to")
+            return
+
+        target = minerals[0]
+
+        # The remaining offset as a plain (x, y) tuple.
+        offset = (target.position.x - rover.position.x, target.position.y - rover.position.y)
+        distance = math.hypot(offset)
+
+        if distance <= 0.5:
+            print(f"tick {state['tick']}: arrived at {target.id} — mission complete")
+            return
+
+        direction = (offset[0] / distance, offset[1] / distance)
+        speed = min(rover.speed_limit, distance)  # never overshoot the target
+
+        result = game.move(rover.id, direction, speed)
+
+        if result["accepted"]:
+            print(f"tick {state['tick']}: heading to {target.id}, {distance:.1f} m to go")
+        else:
+            print(f"tick {state['tick']}: move rejected ({result.get('reason')})")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,12 @@ using SpaceAutomation.Server;
 
 try
 {
-    var save = ".space-automation/world-host.json";
+    // The default save lives in the player's home directory so that every way
+    // of starting the game (just run, VS Code, a raw binary) shares one world
+    // instead of creating one save per working directory.
+    var save = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".space-automation", "world-host.json");
     var port = 8377;
     var paused = false;
 
@@ -44,7 +49,29 @@ try
         }
     }
 
-    var world = WorldStore.Load(save);
+    // A save the current game cannot read (an older world model, a broken
+    // file) must never brick the server: keep it aside, say so, and start a
+    // fresh expedition. The player loses nothing — the old save stays on disk.
+    World world;
+    try
+    {
+        world = WorldStore.Load(save);
+    }
+    catch (InvalidDataException error)
+    {
+        string reason = error.InnerException?.Message ?? error.Message;
+        string backup = save + ".broken-" + DateTime.UtcNow.ToString("yyyy-MM-dd-HHmmss");
+
+        if (File.Exists(save))
+        {
+            File.Move(save, backup);
+        }
+
+        world = Scenario.Create();
+        Console.WriteLine($"the save at {save} cannot be used by this version: {reason}");
+        Console.WriteLine($"kept it as {backup} and started a fresh expedition");
+    }
+
     var session = new GameSession(world, save, Console.WriteLine, paused);
     var app = ServerApi.Build(session, port);
 
@@ -52,6 +79,7 @@ try
     StartOpsConsole(session);
 
     Console.WriteLine($"space automation server — tick {world.Tick}, {world.Objects.Count} objects — http://127.0.0.1:{port}");
+    Console.WriteLine($"save: {save}");
     Console.WriteLine("controls: :pause :resume :step :save :quit — or POST /session/... from any client");
 
     app.Run(); // Ctrl+C: graceful shutdown, then the session saves on dispose

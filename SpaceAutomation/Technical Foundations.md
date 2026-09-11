@@ -79,7 +79,7 @@ One tick per wall-clock second while running; pause and single-step are first-cl
 
 ## Persistence
 
-The authoritative world autosaves every tick and on exit, atomically. Corrupt or unsupported saves are reported and preserved, never overwritten. Save format is versioned; upgrades happen in memory on load (`SaveMigrations`). Players are stateless: their programs can stop and restart freely, and everything that matters lives in the save.
+The authoritative world autosaves every tick and on exit, atomically. A missing save creates the starter scenario. A save the current game cannot read — an older world model after domain changes, or a broken file — is renamed to `<save>.broken-<timestamp>` and a fresh expedition starts, so an incompatible save never blocks play; nothing is ever destroyed. Save format is versioned; compatible upgrades happen in memory on load (`SaveMigrations`). Players are stateless: their programs can stop and restart freely, and everything that matters lives in the save.
 
 ## Extension boundary
 

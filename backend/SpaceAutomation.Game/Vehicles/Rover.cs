@@ -1,5 +1,5 @@
-using SpaceAutomation.Game;
-namespace SpaceAutomation.Game.Objects;
+namespace SpaceAutomation.Game.Vehicles;
+using System.Numerics;
 
 [GameType("rover")]
 public class Rover : GameObject, IMovable
@@ -15,10 +15,9 @@ public class Rover : GameObject, IMovable
 
     public bool HasPendingMovement => PendingMovement is not null;
 
-    public CommandResult Move(Vector2 direction,
-                              float speed)
+    public CommandResult Move(Vector2 direction, float speed)
     {
-        if (!direction.IsFinite || direction == Vector2.Zero)
+        if (direction == Vector2.Zero)
         {
             return CommandResult.Reject("invalid_direction");
         }
@@ -33,7 +32,21 @@ public class Rover : GameObject, IMovable
             return CommandResult.Reject("movement_already_requested");
         }
 
-        PendingMovement = direction.Normalized() * Math.Min(speed, MaxSpeed);
+        PendingMovement = Vector2.Normalize(direction) * Math.Min(speed, MaxSpeed);
+
+        return CommandResult.Ok();
+    }
+
+    public CommandResult Collect(string id){
+        if (World.Find(id) is not ICollectable collectable)
+        {
+            return CommandResult.Reject("invalid_id");
+        }
+
+        // To be done in Update !
+        // Check available space in rover's inventory
+        collectable.Collect();
+        // Add it to the rover's inventory
 
         return CommandResult.Ok();
     }

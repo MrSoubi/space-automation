@@ -42,7 +42,7 @@ public static class WorldStore
             throw new InvalidDataException("Save needs an objects array");
         }
 
-        var world = new World(tick: tick);
+        var world = new World([], tick: tick);
         foreach (var item in objects)
         {
             var record = item as JsonObject;

@@ -10,6 +10,9 @@ status: implemented-prototype
 
 Related: [[Technical Foundations]] · [[Game Design]] · [[First Mission]] · [[Developing Game Objects]]
 
+> [!warning] Superseded
+> The three-process Python prototype documented here was replaced by the single-process C# host (C# simulation, Lua player scripts, in-process interpreter budget instead of runtime killing). This page remains as the prototype's historical record; [[Technical Foundations]] describes the current architecture.
+
 > [!abstract] Goal
 > Launch one Linux application that runs three communicating processes, executes a player's `main.py`, and provides a Python interpreter in that script's live namespace. Demonstrate that both automation and manual commands can inspect and control the same simulated vehicles.
 
@@ -235,6 +238,6 @@ Use focused integration tests for process communication, tick ordering, namespac
 
 ## Deferred work
 
-The prototype does not implement [[First Mission]], world generation, energy, research, production, exploration progress, hot reload of individual modules, persistent player-object graphs, multiplayer, or independent background operation after quitting the launcher.
+The original prototype excludes [[First Mission]], world generation, research, production chains, exploration progress, hot reload of individual modules, persistent player-object graphs, multiplayer, and independent background operation after quitting the launcher. The subsequent [[Energy System]] extension adds connected equipment, power allocation, and real replaceable rover components.
 
 After this prototype, use its results to write the detailed simulation, interpreter, API, runtime, and communication pages listed in [[Technical Foundations]].

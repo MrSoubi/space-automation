@@ -8,165 +8,152 @@ status: implemented
 
 # Developing Game Objects
 
-Related: [[Technical Foundations]] · [[First Prototype]]
+Related: [[Technical Foundations]] · [[Energy System]] · [[First Mission]]
 
 > [!abstract] Start here
-> Write gameplay in `game/objects/`. The engine handles transport, interpreter execution, object discovery, and persistence. A game object is a Python dataclass with fields, ordinary methods, and a simulation update method.
+> Gameplay lives in `backend/SpaceAutomation.Game`. A game object is a plain C# class: fields, ordinary methods, and two lifecycle hooks. The persistence layer saves it automatically; the host exposes it to Lua players. No code generation, no socket handlers.
 
 ## Where to work
 
 | File or folder | Your responsibility |
 | --- | --- |
-| `game/objects/rover.py` | Rover capabilities, movement validation, pending orders, and motion. |
-| `game/objects/solar_panel.py` | A small second-object example: enable/disable and energy generation. |
-| `game/catalog.py` | Register each equipment type once under a stable identifier. |
-| `game/scenario.py` | Choose objects for a new expedition. Existing saves are unaffected. |
-| `player/main.py` | Player automation, not game implementation. |
-| `expedition/generated.py` | Generated typed player wrappers. Do not maintain these by hand. |
-| `space_automation/engine/` | Shared object registration, encoding, command dispatch, and storage. |
-| `space_automation/terminal.py`, `tui.py`, `runtime.py`, `protocol.py` | Application plumbing; adding equipment does not require editing these. |
-
-The authoritative `Rover` class lives in `game/objects/rover.py`. The generated player-side `Rover` has the same documented public shape but forwards calls to that real object. There are two processes, so these cannot be the same Python instance. Only the authoritative class contains the gameplay implementation.
+| `backend/SpaceAutomation.Game/Objects/` | One file per equipment type. |
+| `backend/SpaceAutomation.Game/Energy/` | Ports, capability records, capability interfaces, `EnergySystem`. |
+| `backend/SpaceAutomation.Game/World.cs` | Object collection, clock, tick phases, system wiring. |
+| `backend/SpaceAutomation.Game/Scenario.cs` | Objects present in a new expedition (existing saves are unaffected). |
+| `backend/SpaceAutomation.Host/LuaApi.cs` | The hand-written player-facing Lua surface. |
+| `backend/SpaceAutomation.Tests/Program.cs` | Equipment rules and save round-trips. |
+| `player/main.lua` | Player automation, never game implementation. |
 
 ## Define an object
 
-The included solar panel illustrates the intended extension path. Its essential structure is:
+`Battery` is the smallest complete example:
 
-```python
-from dataclasses import dataclass
-from space_automation.engine import GameObject, command, observed
-from space_automation.types import CommandResult
+```csharp
+[GameType("battery")]
+public class Battery : EnergyEquipment, IStorage
+{
+    [Observed("storage", "Battery capacity and charge in joules.")]
+    public EnergyStorage Storage { get; set; } = new();
 
-@dataclass
-class SolarPanel(GameObject):
-    enabled: bool = observed(default=True, doc="Whether generation is enabled.")
-    energy_per_tick: float = observed(default=1.0, doc="Joules generated per tick.")
-    energy_generated: float = observed(default=0.0, doc="Total joules generated.")
+    internal override void InitializePort() => Energy.StorageId ??= Id;
 
-    @command
-    def set_enabled(self, enabled: bool) -> CommandResult:
-        """Enable or disable this panel."""
-        if type(enabled) is not bool:
-            return CommandResult(False, "invalid_enabled")
-        self.enabled = enabled
-        return CommandResult(True)
-
-    def update(self, dt: float) -> None:
-        if self.enabled:
-            self.energy_generated += self.energy_per_tick
-```
-
-The complete source also validates restored state. The panel is registered as an example but is not spawned in the initial two-rover scenario. Its generated energy is not yet connected to a grid.
-
-### Fields
-
-Use `observed()` for a persisted field players may read. Supply a type annotation and a short documentation string. Generated properties are read-only snapshots, not setters on the simulation object.
-
-Use an ordinary dataclass field for internal persisted state. For example, the rover's `_movement` stores its accepted displacement for the unfinished tick. Players cannot query that field through the public API.
-
-Mutable defaults use `observed(default_factory=list, ...)` or normal `dataclasses.field(default_factory=...)`.
-
-All dataclass fields are saved automatically. Currently supported values are JSON scalars, lists, string-keyed dictionaries, `Vector2`, and `CommandResult`. Use identifiers to store relationships between objects, rather than storing live Python object references. Tuple values round-trip as lists. Non-finite numbers are representable for command validation, but should be rejected by gameplay state validation.
-
-### Commands
-
-Mark a method with `@command` to make it callable by players. Keep its annotations and docstring: these become the generated IDE-facing API.
-
-The engine checks the target object, current tick, exposed method name, and argument binding. The object's method checks gameplay conditions and decides what to change or reject. Unmarked methods such as `update()` and `validate_state()` are not callable through the command dispatcher.
-
-A command can return a `CommandResult` or another supported value. Returning a rejection is an ordinary gameplay outcome; unexpected exceptions become runtime errors for inspection. There is no automatic transaction rollback: validate before mutating if a rejected command must have no side effects.
-
-The once-per-tick movement rule belongs to `Rover.move()`. It is not imposed on all methods or all equipment. The panel's `set_enabled()` can be called multiple times in a tick.
-
-### Simulation updates and interactions
-
-The world calls every object's `update(dt)` once per physical step, in stable id order. This is an engine lifecycle for game implementation. It is separate from the player's single `main.update(dt)` entry point.
-
-Objects added to a world can access `self.world.tick` and resolve another simulation object through `self.world.objects[identifier]`. This context is not a dataclass field, is not saved, and is never exposed to the player. Prefer explicit object ids for persisted references.
-
-Object updates are currently sequential, so direct interactions can depend on update order. More advanced shared-system phases can be designed later; the prototype does not provide an energy-grid scheduler.
-
-### State validation
-
-Override `validate_state()`, call `super().validate_state()`, and reject invalid state with `ValueError`. This runs when adding or restoring an object. Examples include a negative speed capability, an invalid position type, or a pending movement exceeding the rover's capability.
-
-New saved fields with defaults can be absent in older saves. Renaming a field or changing its meaning requires a save migration; unknown saved fields are rejected rather than silently discarded.
-
-## Register and expose the type
-
-Add the class to `game/catalog.py`:
-
-```python
-from game.objects.solar_panel import SolarPanel
-
-OBJECT_TYPES = {
-    # Keep existing registered types here too.
-    "solar_panel": SolarPanel,
+    public override void ValidateState()
+    {
+        base.ValidateState();
+        Rules.Require(Storage is not null, "Storage required");
+        Storage!.Validate();
+        Rules.Require(Energy.StorageId == Id, "Battery port must reference its own storage");
+    }
 }
 ```
 
-Registration keys are stable save identifiers. Then regenerate the player API:
+Rules of the system:
 
-```bash
-.venv/bin/python -m tools.generate_api
+- **`[GameType("battery")]`** is the stable save identifier. Types declared in the Game assembly are discovered automatically; types in other assemblies (like test fixtures) must be registered manually in `Model.Objects`.
+- **`[Observed("name", "doc")]`** marks a persisted, player-readable property. Computed read-only properties use `Persist = false` (see `Rover.MaxSpeed`).
+- **`[Saved("name")]`** marks persisted-but-private state, like the rover's `_movement`.
+- Store **object IDs, never object references** — saves are JSON, and links are re-resolved through the world.
+- Persisted values may be JSON scalars, `List<>`, `Vector2`, and `[ValueType]` records (`EnergyPort`, `EnergyStorage`, ...). Define new record shapes with `[ValueType]` in `Energy/Capabilities.cs`.
+- Renaming a persisted field or changing its meaning requires a **save migration** in `SaveMigrations.cs`; unknown fields in a save are rejected, never silently dropped.
+- Override **`ValidateState()`**, call `base.ValidateState()`, and reject bad state with `Rules.Require(condition, "message")`. It runs when objects are added, restored from a save, and every tick through the energy system — keep it cheap and side-effect free.
+
+### Tick lifecycle
+
+`World.Advance()` runs one tick in three phases:
+
+1. Every object's `PrepareTick()` — declare intentions (the rover sets motor demand).
+2. Shared systems — `EnergySystem.Resolve()` allocates power per connected grid.
+3. Every object's `Update()` — act on what was allocated (the rover moves or reports `not_enough_energy`).
+
+Objects run in stable ID order. Declare in `PrepareTick`, act in `Update`; never mutate neighbors directly — go through a system or a command.
+
+## Expose it to players
+
+The Lua API is hand-written in `SpaceAutomation.Host/LuaApi.cs`. Every proxy is one table with a `__index` metamethod, so data is always read live from the world. Adding members means adding cases to the type's block in `Index`:
+
+```csharp
+if (obj is Battery battery) switch (key.String)
+{
+    case "charge":   return DynValue.NewNumber(battery.Charge);
+    case "capacity": return DynValue.NewNumber(battery.Capacity);
+}
 ```
 
-This writes typed wrappers and exports under `expedition/`. Commit the generated files with the gameplay change. After adding a new exposed method or observed field, run this command again. You do not edit a socket handler, add a packet type, or hand-write a second method implementation.
+Callable commands return the standard result table. Proxy methods are called with `:`, so `args[0]` is the proxy itself and player arguments start at `args[1]`:
 
-Check that generated files match definitions with:
-
-```bash
-.venv/bin/python -m tools.generate_api --check
+```csharp
+case "deposit": return Method("deposit", args =>
+{
+    var amount = ReadNumber(args[1]);
+    if (amount is null) return Result(CommandResult.Reject("invalid_amount"));
+    return Result(cargo.Deposit(amount.Value));
+});
 ```
 
-Use the shared types and Python built-in annotations in exposed signatures. Adding new custom wire value types is a separate engine extension; the generator does not infer arbitrary Python serialization.
+Check Lua argument types before calling the domain — wrong shapes become the same rejection reasons the domain uses. Domain rules (ranges, finiteness, slot conflicts) stay in the domain class; the Lua layer only translates types.
 
-## Place equipment in a new world
+## Place it in a new world
 
-Edit `game/scenario.py`, import the new object, and add an instance to `initial_objects()`:
+Edit `Scenario.Create()`:
 
-```python
-SolarPanel(id="panel-1", energy_per_tick=2.5)
+```csharp
+new CargoStorage { Id = "hub-storage", Capacity = 200 },
 ```
 
-Start with a separate, unused save path to try the changed scenario without replacing your expedition:
+Scenario changes only affect worlds created fresh; existing saves restore their own object list. Try a changed scenario against a throwaway save: `just run --paused --save /tmp/experiment.json`.
 
-```bash
-./space-automation --paused --save /tmp/panel-experiment.json
+## Add a shared system
+
+A **system** is a cross-object phase that no single object can own — energy allocation is the reference implementation (`EnergySystem`). The recipe:
+
+1. A sealed class taking the `World` (`public sealed class MySystem(World world)`).
+2. Discover participants **by interface**, never by class name — `world.Objects.Values.OfType<ISomething>()`. This is why `IProducer`/`IConsumer`/`IStorage`/`IEnergyNode` exist: the grid serves any present or future equipment that declares a capability.
+3. A `Resolve()` that computes the shared phase, and a `Validate()` that checks invariants across objects.
+4. Wire it into `World`: create it in the constructor, call `Resolve()` in `Advance()` between `PrepareTick()` and `Update()`, call `Validate()` from `World.Validate()`.
+
+For example, the planned sample analysis could become `AnalysisSystem`: facilities declare `IAnalysisFacility`, samples declare `IAnalyzable`, and the system resolves queues and research credits in one phase. Resist putting such coordination inside a single object — two facilities sharing one input stream is exactly the case objects cannot decide alone.
+
+## Add gameplay rules
+
+- **Commands are ordinary public methods returning `CommandResult`** — `Ok()` or `Reject("reason")`. Rejection reasons are part of the player API; keep them stable and lowercase.
+- **Validate before mutating.** There is no rollback: a rejected command must leave no side effects.
+- **Per-tick admission slots** follow the rover pattern: a nullable field (`PendingMovement`) is the slot; the first accepted command consumes it (`movement_already_requested`); `Update()` clears it. Anything else may be called repeatedly within a tick.
+- **Energy-consuming work** implements a capability interface (`IConsumer`, `IProducer`, `IStorage`), sets demand in `PrepareTick()`, and checks `Received` in `Update()`. The grid handles allocation; the object never reaches into another object's storage.
+- **Host-installed components** (battery, motor, panel) live under `EnergyEquipment` and record their host in `InstalledIn`. Hosts like the rover implement `IEnergyNode` + `IComponentHost`.
+
+## Test it
+
+Add a case to `backend/SpaceAutomation.Tests/Program.cs` using the local helpers:
+
+```csharp
+Test("cargo storage deposits, withdraws and validates", () => {
+    var storage = new CargoStorage { Id = "s" };
+    var world = new World([storage]);
+    Check(storage.Deposit(50).Accepted);
+    Check(storage.Withdraw(80).Reason == "insufficient_contents");
+    Check(storage.Withdraw(30).Accepted);
+    Near(storage.Contents, 20);
+    var restored = WorldStore.Deserialize(WorldStore.Serialize(world));
+    Near(restored.Find<CargoStorage>("s")!.Contents, 20);
+});
 ```
 
-If that file already exists, it is restored instead of rebuilding the scenario. Scenario edits intentionally do not inject equipment into existing saves.
+Cover the rules, the rejections, and the save round-trip. Then `just test`. Use `just run --paused --save /tmp/...` to try it live; from the Lua prompt:
 
-## Use it as a player
-
-```python
-from expedition import SolarPanel, station
-
-panel = station.get_objects(SolarPanel)[0]
-print(panel.energy_generated)
-result = panel.set_enabled(False)
+```lua
+s = station.get_object("hub-storage")
+s:deposit(10)
+return s.contents
 ```
 
-`station.get_objects()` lists all exposed objects; passing a generated class filters the list. `station.get_object("panel-1")` looks up a specific id. `station.get_fleet()` remains a typed compatibility shortcut for rovers.
+## Complete walkthrough: hub storage
 
-The same calls work from the interpreter and `player/main.py`. Observation properties refresh at execution boundaries, while command return values give immediate feedback. No knowledge of sockets is needed to use or implement `set_enabled()`.
+First Mission gives the hub surface storage. Four small edits:
 
-## Test gameplay without launching the application
+1. **`Objects/CargoStorage.cs`** — the class shown above (`: GameObject`, `Capacity`/`Contents` observed, `Deposit`/`Withdraw` returning `CommandResult`, `ValidateState` rejecting negative or overflowing contents).
+2. **`LuaApi.cs`** — the `contents`, `capacity`, `deposit`, `withdraw` cases shown above.
+3. **`Scenario.cs`** — add `new CargoStorage { Id = "hub-storage", Capacity = 200 }` next to the hub.
+4. **`Tests/Program.cs`** — the test shown above.
 
-```python
-from game.objects.rover import Rover
-from space_automation.types import Vector2
-
-rover = Rover(id="test-rover")
-assert rover.move(Vector2(3, 4), 2).accepted
-rover.update(1.0)
-assert rover.position == Vector2(1.2, 1.6)
-```
-
-Use ordinary unit tests for equipment rules. Integration tests separately cover generated proxies, generic dispatch, persistence, actual process communication, and the terminal.
-
-## Existing saves
-
-The engine reads original version-1 rover saves and converts them in memory to the generic version-2 object format. Positions, tick count, capabilities, and unfinished movement slots are preserved. The next normal save writes version 2. Loading does not rewrite the save file.
-
-The legacy rover adapter is deliberately isolated in the persistence module. It is historical compatibility code, not a template for adding future equipment.
+No persistence edits, no engine edits, no registration list: `[GameType]` is the registration, the save codec handles the fields, and the Lua layer is the only hand-maintained surface. That is the whole extension story.

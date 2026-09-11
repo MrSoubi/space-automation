@@ -7,191 +7,102 @@ status: working-draft
 
 # Technical Foundations
 
-Related: [[Game Design]] · [[First Mission]] · [[First Prototype]] · [[Developing Game Objects]]
+Related: [[Game Design]] · [[First Mission]] · [[Developing Game Objects]] · [[Energy System]]
 
 > [!abstract] Scope
-> This page records the agreed technical direction and the boundaries still to specify. Detailed simulation, interpreter, API, and script-runtime designs will be written in separate pages later.
+> This page records the implemented technical direction. Detailed gameplay design lives in [[Game Design]]; the developer extension guide lives in [[Developing Game Objects]].
 
 ## Language and workspace
 
-Python is the chosen language for the simulation and player code. Players edit ordinary Python scripts in a dedicated folder alongside the project, using their preferred external editor.
+C# (.NET 10) is the implementation language of the simulation and application. Players write **Lua** scripts in a dedicated folder, using their preferred external editor.
 
-The player-facing API should provide type annotations and docstrings for IDE completion and inline reference documentation. Markdown documents provide concepts, explanations, and examples. Editor support depends on the player's chosen Python tooling.
+The player-facing API is hand-written and explicit (`SpaceAutomation.Host/LuaApi.cs`); no schema, no generated wrappers, no reflection-driven command layer. Reflection appears only inside the save system, reading `[GameType]`/`[Observed]`/`[Saved]`/`[ValueType]` metadata.
 
-There is no built-in documentation browser or interpreter help interface supplied by the game. Normal Python capabilities need not be artificially disabled.
+There is no built-in documentation browser or in-game help. Markdown documents provide concepts and examples; the interpreter is the inspection tool.
 
-Exact package layout, Python version, dependencies, and distribution method remain open.
+## Application architecture
 
-## Launch and process architecture
+One process. `./space-automation` (or `just run`) builds if needed and starts `SpaceAutomation.Host`, which owns three threads:
 
-The game targets Linux only. The player runs `./space-automation` from their preferred terminal. This single application launches three cooperating processes:
-
-| Process | Responsibility |
+| Thread | Responsibility |
 | --- | --- |
-| Terminal supervisor | Own terminal input/output, launch and supervise children, coordinate pause, save, shutdown, and recovery. |
-| Player runtime | Load `main.py`, execute its lifecycle callbacks and interpreter submissions in the same live namespace. |
-| Simulation | Own authoritative world state, validate commands, advance the clock and physical actions, and save/load the world. |
+| Game | The world, the clock, the Lua runtime, tick admission, saving. The only thread that touches authoritative state. |
+| UI | Terminal.Gui: buttons, tabs, log, live object table. Reads published snapshots and drains an output queue on a 100 ms timer. |
+| Input | Terminal line reading; lines are queued as commands for the game thread. |
 
-```mermaid
-flowchart LR
-    T[Terminal supervisor] <-->|Input and output| P[Player runtime]
-    P <-->|Observations and commands| S[Simulation]
-    T <-->|Lifecycle control| S
-```
+The old three-process design existed for one reason: killing a hung player runtime. That guarantee is now provided in-process — every Lua invocation runs under an **instruction budget** (MoonSharp's per-instruction debugger hook), so a runaway `while true do end` is aborted deterministically, the world is unharmed, and the session pauses until an explicit restart. No Unix sockets, no wire protocol, no request identifiers; terminals submit commands through a plain queue (`GameSession`).
 
-The terminal process uses Textual for a fixed bottom command field, a scrollable output panel, and a session-name/current-tick status bar. Its supervisor loop runs in a thread within that same process and exchanges input/output with the UI through queues. It still launches only two child processes. Python execution happens inside the player runtime. It must remain responsive if player code hangs. Separation permits detection and termination of a blocked runtime, but does not guarantee that arbitrary Python execution can safely resume after interruption.
+A plain line-based console replaces the TUI automatically when streams are redirected (`--plain` forces it), which keeps the game scriptable and testable.
 
-### Communication
+## Startup sequence
 
-Use private Unix domain socket connections between the processes. D-Bus is not required. The starting proposal is length-prefixed JSON messages with request identifiers and an explicit protocol version. Transport details belong in a future communication specification; [[First Prototype]] defines a minimal scope to validate the architecture.
+1. Load the last saved world, or create the starter scenario.
+2. Create `player/main.lua` if missing (never overwrite an existing one).
+3. Load it and call `startup()` once; a load or startup failure latches the session paused until restart.
+4. Begin ticking and accept interpreter input.
 
-Exchange data, entity identifiers, and commands rather than live Python objects. The simulation alone owns physical state. Player objects remain inside the player runtime.
-
-### Startup sequence
-
-1. Launch the supervisor and its two children.
-2. Load the last saved simulation state, or create the initial world.
-3. Keep simulation time paused during initialization.
-4. Expose the initial observations and expedition API to the player runtime.
-5. Load the player's `main.py` and call `startup()` once.
-6. If initialization succeeds, begin ticking and accept interpreter submissions.
-
-An initialization failure leaves the session paused and reports the error. Resuming a save restores the world and ongoing physical actions, not Python call stacks. There is no offline progress in the starting design.
+Simulation time excludes time spent paused. There is no offline progress.
 
 ## One player entry point
 
-The game supplies a minimal `main.py` in the player script folder. This is the only script with a game-managed lifecycle:
+```lua
+-- player/main.lua
+function startup()
+end
 
-```python
-from expedition import station
-
-def startup():
-    pass
-
-def update(dt):
-    pass
+function update(dt)
+end
 ```
 
-`startup()` initializes player code after loading the world and is called again when the entry point is explicitly reloaded. `update(dt)` runs once per simulation tick. Exact reload behavior and production tick duration remain to be specified.
+`startup()` runs once per runtime load (also after `:restart`). `update(dt)` runs once per tick, before the physical step, and may issue commands. All other organization — controllers, modules, schedulers — is player code; the game attaches scripts to nothing and manages no registrations.
 
-All other organization belongs to the player. They may import modules, create controllers, implement signals, or build their own scheduler. The game does not attach scripts to equipment, discover controller classes, invoke their callbacks, or manage their registrations.
+## Interpreter
 
-For example, the player may choose this convention:
+Interpreter submissions execute in the **same global environment** as `main.lua` (MoonSharp `Globals`). Assignments affect the variables `update()` later reads; a player function called from the prompt submits commands normally. Bare expressions echo their value; `↑`/`↓` browse history.
 
-```python
-from expedition import station
-from controllers import RoverController
-
-controllers = {}
-
-def startup():
-    for rover in station.get_fleet():
-        controllers[rover.id] = RoverController(rover)
-
-def update(dt):
-    for controller in controllers.values():
-        controller.update(dt)
-```
-
-`RoverController` and its `update()` method are player code, not required game interfaces. Newly constructed equipment becomes accessible through the API; deciding how to control it is the player's responsibility.
-
-## Interpreter and live manual interaction
-
-Interpreter submissions execute in the actual global namespace of `main.py`, not a copied dictionary. This makes its variables, functions, and imported modules available directly:
-
-```python
-print(station.get_fleet()[0].status)
-controllers["rover-1"].display_status()
-controllers["rover-1"].automation_enabled = False
-```
-
-Assignments must affect the globals subsequently read by `update()`. A player method is allowed to issue commands regardless of its name: calling movement inside `display_status()` submits movement normally.
-
-No map, fleet dashboard, or custom status formatter is supplied. The `station` object represents the remote connection to planetary equipment, not orbital production.
-
-The runtime serializes interpreter execution and the two game lifecycle callbacks. Player-defined event dispatch and controller ordering are the player's responsibility. Manual and automated commands have equal authority; the documented execution order determines which request arrives first.
-
-An exception escaping `startup()`, `update()`, or interpreter execution is reported with a traceback. The proposed recovery policy pauses the simulation for inspection. Accepted actions are not silently undone.
+An exception from `startup()` or `update()` reports a traceback and latches the session paused; already-accepted commands remain accepted, and the interpreter stays available for inspection. A REPL error only reports — a typo should not stop the world. Recovery requires an explicit restart, which reloads `main.lua` from disk, re-calls `startup()`, and stays paused.
 
 ## World commands and observations
 
-Player API actions submit commands rather than directly modifying authoritative simulation state. Local controller parameter changes happen in player code; physical actions are validated and executed by the simulation.
+Player actions are method calls through the station API, validated by the simulation:
 
-Command acceptance and action completion are separate events. An accepted movement order does not imply arrival. A query immediately after submitting movement does not imply a changed position.
+```lua
+local result = rover:move(vector(1, 0), 2)
+-- {accepted=true}  or  {accepted=false, reason="invalid_speed"}
+```
 
-The simulation must expose rejection reasons and observable action state. The starting proposal makes command acceptance synchronous: the API waits for an acceptance or rejection response, while the action itself completes over simulation time. The simulation must continue servicing command requests while awaiting callback completion to avoid deadlock. Observation properties read a consistent local snapshot.
+Acceptance is synchronous; **completion happens over simulation time**. Reading `rover.position` immediately after an accepted move still shows the old position — resolution happens in the tick's allocation phase.
 
-Consistent observations, command ordering, and the boundary between ticks must be defined together in the future simulation and API specifications.
+The first accepted movement per rover per tick wins (`movement_already_requested`); slots reset when the tick commits. Paused commands reserve slots without advancing.
 
 ## Movement contract
 
-Positions use continuous 2D coordinates in meters. The API exposes `Vector2` values and a vehicle-specific `max_speed` in meters per tick:
-
-```python
-rover.move(direction, speed)
-```
-
-The simulation normalizes a nonzero direction vector, so its magnitude does not increase travel distance. Requested speed above `rover.max_speed` is capped to that maximum. Destination-based navigation, including `move_to(destination)`, remains player-written.
-
-For the prototype, each accepted request applies to one tick only:
+Positions are continuous 2D meters; `vector(x, y)` builds values. `max_speed` is meters per tick:
 
 ```text
 position_next = position + normalized(direction) * min(speed, max_speed)
 ```
 
-Speed is already in meters per tick, so this displacement is not multiplied by `dt` in seconds. Without an accepted movement request, the rover stays in place that tick. There is no inertia or multi-tick movement job. Player automation issues new movement requests each tick to keep moving.
+Direction is normalized, so its magnitude cannot extend travel. Requested speed above `max_speed` is capped, not rejected. Non-finite or negative speeds and zero or non-finite directions are invalid (`invalid_direction`, `invalid_speed`). Zero speed with a valid direction is an accepted no-op that still consumes the slot. No inertia, no multi-tick movement jobs: continuous travel means one request per tick. Destination navigation is player-written.
 
-Negative or non-finite speeds and zero or non-finite directions are invalid. Zero speed with a valid direction is an accepted no-displacement request. These detailed validation choices are prototype rules, subject to later API refinement.
+## Simulation time
 
-### Multiple movement requests in one tick
-
-**The first valid movement command accepted for a rover in a tick wins.** Subsequent valid movement requests for that rover in that tick are rejected as `movement_already_requested`, regardless of their origin.
-
-```python
-rover.move(direction_a, speed_a)  # Accepted if valid.
-rover.move(direction_b, speed_b)  # Rejected in the same tick.
-```
-
-Each rover has its own slot. Invalid requests do not consume it; accepted zero-speed requests do. Slots reset at the next tick. There is no movement-related busy state carried into the next tick.
-
-Manual intervention has no special priority. Disabling automation does not withdraw a request already accepted for the current tick.
-
-The prototype uses no grid, obstacles, or collision resolution. Those may be introduced later without making destination navigation a built-in capability.
-
-## Simulation time and scheduling
-
-Use coordinated simulation steps. For each step, expose the current observations, execute interpreter submissions admitted at the input boundary, call `main.update(dt)`, finish processing commands, and advance the world by a fixed simulation duration.
-
-Input arriving after the boundary waits for the next execution opportunity. An unfinished input line does not block ticking. Callback and interpreter execution do not overlap.
-
-Slow player code slows real-time execution rather than increasing `dt` or skipping updates. A hung runtime prevents the coordinated step from completing; the supervisor must allow recovery. No physical advance happens while waiting for player execution to finish.
-
-Support continuous execution, pause, and explicit stepping. Simulation time excludes time spent paused. Commands entered while paused share the upcoming tick's admission slot; additional submissions do not reset it. Precise boundary and admission behavior is scoped in [[First Prototype]] and will be expanded in the simulation specification.
+One tick per wall-clock second while running; pause and single-step are first-class. A tick round is: admit queued interpreter lines, run `update(dt)`, resolve systems (`PrepareTick` → energy → `Update`), advance the clock, autosave, publish state. Slow player code slows real time rather than stretching `dt` or skipping updates; the instruction budget aborts instead of hanging.
 
 ## Reload and persistence
 
-The game manages the lifecycle of `main.py` only. It does not replace individual player controllers or repair arbitrary references to them.
+The game manages the lifecycle of `main.lua` only; imported player modules and live variables are not reloaded piecemeal. `:restart` (or the Restart button) recreates the Lua runtime from disk.
 
-An explicit reload must invoke `startup()` again. Handling imported module caches, global variables, stale interpreter references, reload failures, and pending commands requires further design. Live edits to player variables have no implied persistence across reload or process restart.
+The authoritative world autosaves every tick and on exit, atomically. Corrupt or unsupported saves are reported and preserved, never overwritten. Player variables are never persisted. Save format is versioned; upgrades happen in memory on load (`SaveMigrations`).
 
-Save the authoritative world, including simulation time and ongoing actions. An explicit mechanism for persistent player data may be added later; arbitrary Python stacks and objects are not automatically saved.
+## Terminal
 
-## Future technical pages
-
-The next documents should specify:
-
-| Planned page | Decisions to cover |
-| --- | --- |
-| Simulation | Tick phases, clock, world state, action durations, deterministic ordering, save/load. |
-| Interpreter | Live object access, command execution, pausing, output, interruption, errors. |
-| Player API | Observations, commands, validation, outcomes, units, equipment capabilities. |
-| Script Runtime | Entry-point lifecycle, execution order, imports, reload, state, fault recovery. |
-| Process Communication | Transport, snapshots, command sequencing, disconnection, synchronization. |
-
-These detailed pages are intentionally not created yet. [[First Prototype]] records the implemented first prototype; prototype constants and protocol choices are not final gameplay balance.
+Terminal.Gui v2 provides a mouse-driven TUI: a Console tab (log, results), an Objects tab (live world table), a Lua input line, and buttons replacing commands (Pause/Resume, Step, Restart, Quit). `:pause :resume :step :restart :quit` remain accepted in the input line; `Ctrl+Q` quits.
 
 ## Gameplay extension boundary
 
-Authoritative equipment classes live in `game/objects/`. The world owns the object collection and clock; object methods own gameplay rules. One generic dispatcher handles exposed commands for every registered type.
+Equipment classes live in `SpaceAutomation.Game/Objects/`, shared systems in `Energy/` (for energy) or wired through `World.Advance` (for new domains). Registration is `[GameType]`; persistence is generic over `[Observed]`/`[Saved]` fields; the player surface is hand-written in `LuaApi.cs`. See [[Developing Game Objects]] for the complete recipes (objects, systems, commands, capabilities) and a full walkthrough.
 
-`observed()` fields define public snapshots and `@command` methods define player calls. A developer tool generates typed wrappers and exports, preserving IDE support without hand-maintaining remote implementations. Generic persistence saves each object's dataclass fields. See [[Developing Game Objects]] for the complete workflow and the solar-panel example.
+## Energy implementation
+
+[[Energy System]] documents the capability records, real replaceable component objects, and the shared allocation phase. Object `PrepareTick()` declares demand, the energy system allocates once per connected grid, and `Update()` performs the work with the energy actually received.

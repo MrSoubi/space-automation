@@ -1,9 +1,9 @@
-# Python bytecode and virtual environments
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-env/
+# Build artifacts
+**/bin/
+**/obj/
+
+# Local game saves
+.space-automation/
 
 # Secrets and machine-specific environment configuration
 .env
@@ -11,28 +11,12 @@ env/
 *.env
 *.env.*
 !.env.example
-!.env.sample
-!.env.template
 *.pem
 *.key
 *.p12
 *.pfx
 credentials.json
 secrets.json
-
-# Local game saves
-.space-automation/
-
-# Test, lint, and packaging artifacts
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-build/
-dist/
-*.egg-info/
 
 # Local editor state and operating-system files
 **/.obsidian/workspace*.json

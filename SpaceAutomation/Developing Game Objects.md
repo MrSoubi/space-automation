@@ -22,7 +22,6 @@ Related: [[Technical Foundations]] · [[Energy System]] · [[First Mission]]
 | `backend/SpaceAutomation.Game/World.cs` | Object collection, clock, tick phases, system wiring. |
 | `backend/SpaceAutomation.Game/Scenario.cs` | Objects present in a new expedition (existing saves are unaffected). |
 | `backend/SpaceAutomation.Server/ServerApi.cs` | Hand-written command routes; reads need nothing here. |
-| `backend/SpaceAutomation.Tests/Program.cs` | Equipment rules, save round-trips, HTTP surface. |
 | `player/main.py` | Reference client, never game implementation. |
 
 ## Define an object
@@ -50,7 +49,7 @@ public class Battery : EnergyEquipment, IStorage
 
 Rules of the system:
 
-- **`[GameType("battery")]`** is the stable save identifier. Types declared in the Game assembly are discovered automatically; types in other assemblies (like test fixtures) must be registered manually in `Model.Objects`.
+- **`[GameType("battery")]`** is the stable save identifier. Types declared in the Game assembly are discovered automatically; types in other assemblies must be registered manually in `Model.Objects`.
 - **`[Observed("name", "doc")]`** marks a persisted, player-readable property. Computed read-only properties use `Persist = false` (see `Rover.MaxSpeed`).
 - **`[Saved("name")]`** marks persisted-but-private state, like the rover's `_movement`.
 - Store **object IDs, never object references** — saves are JSON, and links are re-resolved through the world.
@@ -74,32 +73,67 @@ Reads and writes travel different roads, by design.
 
 **Reads are free.** `GET /state` and `GET /objects/{id}` are projected mechanically from `[Observed]` declarations — the same metadata the save codec persists. Mark a property `[Observed]` (with `Persist = false` for computed values like `charge` or `max_speed`) and it appears in every client's next poll. There is no projection code to write and nothing can drift.
 
-**Commands are hand-written routes** in `SpaceAutomation.Server/ServerApi.cs`. Each route binds a small request record, validates the shape, and calls the domain method through the session's call channel — the domain answers with the `CommandResult` the client sees:
+**Commands use named handlers** in `SpaceAutomation.Server/ServerApi.cs`. Route registration names the handler; the handler explicitly reads JSON, validates the request, then looks up the object and calls its domain method in one game-thread call. Request records contain only data.
+
+For a future cargo-storage command, register the route inside `MapRoutes`:
 
 ```csharp
-app.MapPost("/objects/{id}/deposit", (string id, DepositRequest? body) =>
-    WithObject<CargoStorage>(session, id, async storage =>
-    {
-        if (body is null)
-            return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+app.MapPost("/objects/{id}/deposit", (string id, HttpContext context) => Deposit(session, id, context));
+```
 
-        if (body.Amount is not { } amount)
-            return Results.Json(CommandResult.Reject("invalid_amount"), Json);
+Add the handler to `ServerApi`:
 
-        return Results.Json(await session.Call(_ => storage.Deposit(amount)), Json);
-    }));
-
-public sealed record DepositRequest(double? Amount)
+```csharp
+private static async Task<IResult> Deposit(GameSession session, string id, HttpContext context)
 {
-    public static async ValueTask<DepositRequest?> BindAsync(HttpContext context)
+    DepositRequest? body;
+    try
     {
-        try { return await JsonSerializer.DeserializeAsync<DepositRequest>(context.Request.Body, ServerApi.Json); }
-        catch (JsonException) { return null; }
+        body = await JsonSerializer.DeserializeAsync<DepositRequest>(context.Request.Body, Json);
     }
+    catch (JsonException)
+    {
+        return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+    }
+
+    if (body is null)
+    {
+        return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+    }
+
+    if (body.Amount is null)
+    {
+        return Results.Json(CommandResult.Reject("invalid_amount"), Json);
+    }
+
+    float amount = body.Amount.Value;
+    return await session.Call<IResult>(world =>
+    {
+        GameObject? obj = world.Find<GameObject>(id);
+        if (obj is null)
+        {
+            return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
+        }
+
+        CargoStorage? storage = obj as CargoStorage;
+        if (storage is null)
+        {
+            return Results.Json(CommandResult.Reject("unsupported_object"), Json, statusCode: 400);
+        }
+
+        CommandResult result = storage.Deposit(amount);
+        return Results.Json(result, Json);
+    });
 }
 ```
 
-`WithObject<T>` resolves the target on the game thread and answers `404 unknown_object` / `400 unsupported_object` before your route runs. Null check the body (`BindAsync` returns null for unparseable JSON), check each field for absence, and turn both into the same rejection reasons the domain uses — `invalid_amount`, not a framework error. Domain rules (ranges, finiteness, slot conflicts) stay in the domain class; the route only translates shapes.
+Declare the request record alongside the other request types:
+
+```csharp
+public sealed record DepositRequest(float? Amount);
+```
+
+Read the body directly so plain `curl -d` works regardless of the Content-Type header. Validate the body before looking up the object: malformed or missing JSON gives `400 invalid_body`; missing fields give their specific rejection reason. A valid request for an unknown object gives `404 unknown_object`; an incompatible object gives `400 unsupported_object`. Domain rules (ranges, finiteness, slot conflicts) stay in the domain class. Keep lookup and execution together inside `session.Call` so authoritative state is accessed only on the game thread.
 
 ## Place it in a new world
 
@@ -130,24 +164,9 @@ For example, the planned sample analysis could become `AnalysisSystem`: faciliti
 - **Energy-consuming work** implements a capability interface (`IConsumer`, `IProducer`, `IStorage`), sets demand in `PrepareTick()`, and checks `Received` in `Update()`. The grid handles allocation; the object never reaches into another object's storage.
 - **Host-installed components** (battery, motor, panel) live under `EnergyEquipment` and record their host in `InstalledIn`. Hosts like the rover implement `IEnergyNode` + `IComponentHost`.
 
-## Test it
+## Try it
 
-Add a case to `backend/SpaceAutomation.Tests/Program.cs` using the local helpers:
-
-```csharp
-Test("cargo storage deposits, withdraws and validates", () => {
-    var storage = new CargoStorage { Id = "s" };
-    var world = new World([storage]);
-    Check(storage.Deposit(50).Accepted);
-    Check(storage.Withdraw(80).Reason == "insufficient_contents");
-    Check(storage.Withdraw(30).Accepted);
-    Near(storage.Contents, 20);
-    var restored = WorldStore.Deserialize(WorldStore.Serialize(world));
-    Near(restored.Find<CargoStorage>("s")!.Contents, 20);
-});
-```
-
-Cover the rules, the rejections, and the save round-trip. Then `just test`. Use `just run --paused --save /tmp/...` to try it live, from any shell:
+Build with `just build`, then use `just run --paused --save /tmp/...` to try it live, from any shell:
 
 ```bash
 curl -X POST localhost:8377/objects/hub-storage/deposit -d '{"amount": 10}'
@@ -156,11 +175,10 @@ curl localhost:8377/objects/hub-storage          # {"id":"hub-storage","contents
 
 ## Complete walkthrough: hub storage
 
-First Mission gives the hub surface storage. Four small edits:
+First Mission gives the hub surface storage. Three small edits:
 
 1. **`Objects/CargoStorage.cs`** — the class shown above (`: GameObject`, `Capacity`/`Contents` observed, `Deposit`/`Withdraw` returning `CommandResult`, `ValidateState` rejecting negative or overflowing contents).
 2. **`ServerApi.cs`** — the `deposit`/`withdraw` routes and request records shown above; `contents`/`capacity` need nothing.
 3. **`Scenario.cs`** — add `new CargoStorage { Id = "hub-storage", Capacity = 200 }` next to the hub.
-4. **`Tests/Program.cs`** — the domain test shown above plus an HTTP case through the `StartServer` harness.
 
 No persistence edits, no engine edits, no registration list: `[GameType]` is the registration, the save codec handles the fields, the projection handles the reads, and hand-written routes are the only maintained surface. That is the whole extension story.

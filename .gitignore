@@ -19,6 +19,7 @@ credentials.json
 secrets.json
 
 # Local editor state and operating-system files
+.vscode/
 **/.obsidian/workspace*.json
 **/.obsidian/cache/
 .DS_Store

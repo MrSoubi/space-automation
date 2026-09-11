@@ -1,5 +1,7 @@
-using SpaceAutomation.Game.Energy;
+using SpaceAutomation.Game;
 namespace SpaceAutomation.Game.Objects;
 
 [GameType("hub")]
-public class Hub : EnergyEquipment;
+public class Hub : GameObject
+{
+}

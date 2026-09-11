@@ -27,7 +27,7 @@ public abstract record SessionCommand
 // replaces the old in-process instruction budget.
 public sealed class GameSession : IDisposable
 {
-    private readonly BlockingCollection<SessionCommand> _commands = new();
+    private readonly BlockingCollection<SessionCommand> _commands = new BlockingCollection<SessionCommand>();
 
     private readonly string _savePath;
     private readonly Action<string> _print;
@@ -65,15 +65,24 @@ public sealed class GameSession : IDisposable
 
     public void PauseOrResume()
     {
-        if (_paused) Resume();
-        else Pause();
+        if (_paused)
+        {
+            Resume();
+        }
+        else
+        {
+            Pause();
+        }
     }
 
     // Runs exactly one tick and reports when it has completed. Only offered
     // while paused; a running session already ticks on its own schedule.
     public Task<CommandResult> Step()
     {
-        if (!_paused) return Task.FromResult(CommandResult.Reject("not_paused"));
+        if (!_paused)
+        {
+            return Task.FromResult(CommandResult.Reject("not_paused"));
+        }
 
         return Call(world =>
         {
@@ -93,21 +102,33 @@ public sealed class GameSession : IDisposable
         var completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var command = new SessionCommand.Call(() => (object?)work(World), completion);
 
-        try { _commands.Add(command); }
+        try
+        {
+            _commands.Add(command);
+        }
 
         catch (Exception e) when (e is ObjectDisposedException or InvalidOperationException)
         {
             throw new ObjectDisposedException(nameof(GameSession), "the session is shutting down");
         }
 
-        return (T)(await completion.Task.ConfigureAwait(false))!;
+        object? result = await completion.Task.ConfigureAwait(false);
+        // The queued function returns T. T may itself be nullable, so a null
+        // result is valid; this assertion only suppresses the compiler warning.
+        return (T)result!;
     }
 
     private void Submit(SessionCommand command)
     {
-        try { _commands.Add(command); }
+        try
+        {
+            _commands.Add(command);
+        }
 
-        catch (Exception e) when (e is ObjectDisposedException or InvalidOperationException) { /* shutting down */ }
+        catch (Exception e) when (e is ObjectDisposedException or InvalidOperationException)
+        {
+            /* shutting down */
+        }
     }
 
     private void GameLoop()
@@ -119,18 +140,37 @@ public sealed class GameSession : IDisposable
         {
             if (_paused)
             {
-                if (TryTake(Timeout.Infinite, out var command)) Execute(command);
+                if (TryTake(Timeout.Infinite, out var command) && command is not null)
+                {
+                    Execute(command);
+                }
             }
             else
             {
-                while (TryTake(0, out var command)) Execute(command);
+                while (TryTake(0, out var command) && command is not null)
+                {
+                    Execute(command);
+                }
 
-                if (_quit || _paused) continue;
+                if (_quit || _paused)
+                {
+                    continue;
+                }
 
                 var elapsed = clock.Elapsed.TotalMilliseconds;
-                if (elapsed >= nextTickAt + TickMilliseconds) nextTickAt = elapsed; // no catch-up bursts
-                if (elapsed >= nextTickAt) { TickRound(); nextTickAt += TickMilliseconds; }
-                else if (TryTake((int)(nextTickAt - elapsed), out var command)) Execute(command);
+                if (elapsed >= nextTickAt + TickMilliseconds)
+                {
+                    nextTickAt = elapsed; // no catch-up bursts
+                }
+                if (elapsed >= nextTickAt)
+                {
+                    TickRound();
+                    nextTickAt += TickMilliseconds;
+                }
+                else if (TryTake((int)(nextTickAt - elapsed), out var command) && command is not null)
+                {
+                    Execute(command);
+                }
             }
         }
 
@@ -138,18 +178,23 @@ public sealed class GameSession : IDisposable
         // request is left hanging on a session that will never run them.
         while (_commands.TryTake(out var pending))
         {
-            if (pending is SessionCommand.Call(_, { } completion))
-                completion.TrySetException(new ObjectDisposedException(nameof(GameSession)));
+            if (pending is SessionCommand.Call call && call.Completion is not null)
+            {
+                call.Completion.TrySetException(new ObjectDisposedException(nameof(GameSession)));
+            }
         }
     }
 
-    private bool TryTake(int timeout, out SessionCommand command)
+    private bool TryTake(int timeout, out SessionCommand? command)
     {
-        try { return _commands.TryTake(out command!, timeout); }
+        try
+        {
+            return _commands.TryTake(out command, timeout);
+        }
 
         catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
         {
-            command = null!;
+            command = null;
             return false;
         }
     }
@@ -158,10 +203,21 @@ public sealed class GameSession : IDisposable
     {
         switch (command)
         {
-            case SessionCommand.Call(var work, var completion):
-                try { completion.TrySetResult(work()); }
-                catch (Exception e) { completion.TrySetException(e); }
+            case SessionCommand.Call call:
+            {
+                var work = call.Work;
+                var completion = call.Completion;
+                try
+                {
+                    object? result = work();
+                    completion.TrySetResult(result);
+                }
+                catch (Exception e)
+                {
+                    completion.TrySetException(e);
+                }
                 break;
+            }
 
             case SessionCommand.Pause:
                 _paused = true;
@@ -195,8 +251,14 @@ public sealed class GameSession : IDisposable
 
     private void SaveWorld(string reason)
     {
-        try { WorldStore.Save(World, _savePath); }
-        catch (Exception e) { _print($"autosave failed ({reason}): {e.Message}"); }
+        try
+        {
+            WorldStore.Save(World, _savePath);
+        }
+        catch (Exception e)
+        {
+            _print($"autosave failed ({reason}): {e.Message}");
+        }
     }
 
     // The snapshot is the only world state HTTP ever serves. Rebuilt after
@@ -208,13 +270,19 @@ public sealed class GameSession : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
 
         _disposed = true;
         _quit = true;
         _commands.CompleteAdding();
 
-        if (_thread.IsAlive) _thread.Join();
+        if (_thread.IsAlive)
+        {
+            _thread.Join();
+        }
 
         SaveWorld("exit"); // final save: paused sessions are not autosaved per tick
         _commands.Dispose();

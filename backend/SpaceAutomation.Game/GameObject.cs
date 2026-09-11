@@ -10,14 +10,26 @@ public abstract class GameObject
     [Observed("position", "Position in meters.")]
     public Vector2 Position { get; set; }
 
-    public World World => _world ?? throw new InvalidOperationException("Add this object to a World first");
+    public World World
+    {
+        get
+        {
+            if (_world is null)
+            {
+                throw new InvalidOperationException("Add this object to a World first");
+            }
+
+            return _world;
+        }
+    }
 
     internal void Attach(World world)
     {
-        if (_world is not null && !ReferenceEquals(_world, world)){
+        if (_world is not null && !ReferenceEquals(_world, world))
+        {
             throw new InvalidOperationException("Object already belongs to another world");
         }
-        
+
         _world = world;
     }
 

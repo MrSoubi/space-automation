@@ -6,7 +6,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SpaceAutomation.Game;
-using SpaceAutomation.Game.Energy;
 using SpaceAutomation.Game.Objects;
 
 namespace SpaceAutomation.Server;
@@ -19,7 +18,7 @@ public static class ServerApi
 {
     // Snake-case rejection fields with null reasons omitted: {"accepted":true}
     // or {"accepted":false,"reason":"invalid_speed"}.
-    internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    internal static readonly JsonSerializerOptions Json = new JsonSerializerOptions(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
@@ -36,155 +35,120 @@ public static class ServerApi
 
     private static void MapRoutes(WebApplication app, GameSession session)
     {
-        app.MapGet("/state", () => Results.Json(session.State, Json));
+        app.MapGet("/state", () => GetState(session));
+        app.MapGet("/objects/{id}", (string id) => GetObject(session, id));
+        app.MapPost("/objects/{id}/move", (string id, HttpContext context) => MoveRover(session, id, context));
+        app.MapPost("/session/pause", () => PauseSession(session));
+        app.MapPost("/session/resume", () => ResumeSession(session));
+        app.MapPost("/session/step", () => StepSession(session));
+        app.MapPost("/session/save", () => SaveSession(session));
+    }
 
-        app.MapGet("/objects/{id}", (string id) =>
+    private static IResult GetState(GameSession session)
+    {
+        return Results.Json(session.State, Json);
+    }
+
+    private static IResult GetObject(GameSession session, string id)
+    {
+        var state = session.State;
+        foreach (var projection in state.Objects)
         {
-            var projection = FindProjection(session, id);
-            return projection is null
-                ? Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404)
-                : Results.Json(projection, Json);
+            if (!projection.TryGetValue("id", out var objectId))
+            {
+                continue;
+            }
+
+            if ((string?)objectId == id)
+            {
+                return Results.Json(projection, Json);
+            }
+        }
+
+        return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
+    }
+
+    private static async Task<IResult> MoveRover(GameSession session, string id, HttpContext context)
+    {
+        MoveRequest? body;
+        try
+        {
+            body = await JsonSerializer.DeserializeAsync<MoveRequest>(context.Request.Body, Json);
+        }
+        catch (JsonException)
+        {
+            return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+        }
+
+        if (body is null)
+        {
+            return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+        }
+
+        if (body.Direction is null ||
+            body.Direction.X is null ||
+            body.Direction.Y is null)
+        {
+            return Results.Json(CommandResult.Reject("invalid_direction"), Json);
+        }
+
+        if (body.Speed is null)
+        {
+            return Results.Json(CommandResult.Reject("invalid_speed"), Json);
+        }
+
+        float x = body.Direction.X.Value;
+        float y = body.Direction.Y.Value;
+        float speed = body.Speed.Value;
+        var direction = new Vector2(x, y);
+
+        // Look up the object and execute its command together on the game thread.
+        return await session.Call<IResult>(world =>
+        {
+            GameObject? obj = world.Find<GameObject>(id);
+            if (obj is null)
+            {
+                return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
+            }
+
+            Rover? rover = obj as Rover;
+            if (rover is null)
+            {
+                return Results.Json(CommandResult.Reject("unsupported_object"), Json, statusCode: 400);
+            }
+
+            CommandResult result = rover.Move(direction, speed);
+            return Results.Json(result, Json);
         });
-
-        app.MapGet("/objects/{id}/grid_status", (string id) =>
-            WithObject<IEnergyNode>(session, id, async node =>
-            {
-                var report = await session.Call(_ => node.GridStatus());
-                return Results.Json(StateProjection.Encode(report), Json);
-            }));
-
-        app.MapPost("/objects/{id}/move", (string id, MoveRequest? body) =>
-            WithObject<Rover>(session, id, async rover =>
-            {
-                if (body is null)
-                    return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
-
-                if (body.Direction is not { X: { } x, Y: { } y })
-                    return Results.Json(CommandResult.Reject("invalid_direction"), Json);
-
-                if (body.Speed is not { } speed)
-                    return Results.Json(CommandResult.Reject("invalid_speed"), Json);
-
-                return Results.Json(await session.Call(_ => rover.Move(new Vector2(x, y), speed)), Json);
-            }));
-
-        app.MapPost("/objects/{id}/connect", (string id, ConnectRequest? body) =>
-            WithObject<IEnergyNode>(session, id, async node =>
-            {
-                if (body is null)
-                    return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
-
-                if (body.Target is not { } target)
-                    return Results.Json(CommandResult.Reject("invalid_energy_endpoint"), Json);
-
-                return Results.Json(await session.Call(_ => node.Connect(target)), Json);
-            }));
-
-        app.MapPost("/objects/{id}/disconnect", (string id, ConnectRequest? body) =>
-            WithObject<IEnergyNode>(session, id, async node =>
-            {
-                if (body is null)
-                    return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
-
-                if (body.Target is not { } target)
-                    return Results.Json(CommandResult.Reject("invalid_energy_endpoint"), Json);
-
-                return Results.Json(await session.Call(_ => node.Disconnect(target)), Json);
-            }));
-
-        app.MapPost("/objects/{id}/replace_component", (string id, ReplaceComponentRequest? body) =>
-            WithObject<Rover>(session, id, async rover =>
-            {
-                if (body is null)
-                    return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
-
-                if (body.Slot is not { } slot)
-                    return Results.Json(CommandResult.Reject("invalid_slot"), Json);
-
-                // A null component removes the part from that slot.
-                return Results.Json(await session.Call(_ => rover.ReplaceComponent(slot, body.Component)), Json);
-            }));
-
-        app.MapPost("/objects/{id}/set_enabled", (string id, SetEnabledRequest? body) =>
-            WithObject<SolarPanel>(session, id, async panel =>
-            {
-                if (body is null)
-                    return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
-
-                if (body.Enabled is not { } enabled)
-                    return Results.Json(CommandResult.Reject("invalid_enabled"), Json);
-
-                return Results.Json(await session.Call(_ => panel.SetEnabled(enabled)), Json);
-            }));
-
-        app.MapPost("/session/pause", () => { session.Pause(); return Results.Json(CommandResult.Ok(), Json); });
-
-        app.MapPost("/session/resume", () => { session.Resume(); return Results.Json(CommandResult.Ok(), Json); });
-
-        app.MapPost("/session/step", async () => Results.Json(await session.Step(), Json));
-
-        app.MapPost("/session/save", () => { session.Save(); return Results.Json(CommandResult.Ok(), Json); });
     }
 
-    // Resolves the target on the game thread, then hands the typed object to
-    // the route's own call. Unknown ids are 404s; objects that do not support
-    // the command answer 400 with the same rejection shape as gameplay rules.
-    private static async Task<IResult> WithObject<T>(GameSession session, string id, Func<T, Task<IResult>> action)
-        where T : class
+    private static IResult PauseSession(GameSession session)
     {
-        var target = await session.Call(world => world.Find<GameObject>(id));
-
-        if (target is null)
-            return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
-
-        if (target is not T typed)
-            return Results.Json(CommandResult.Reject("unsupported_object"), Json, statusCode: 400);
-
-        return await action(typed);
+        session.Pause();
+        return Results.Json(CommandResult.Ok(), Json);
     }
 
-    private static IReadOnlyDictionary<string, object?>? FindProjection(GameSession session, string id) =>
-        session.State.Objects.FirstOrDefault(fields => fields.TryGetValue("id", out var objectId) && (string?)objectId == id);
-}
-
-// Request bodies are plain data: nullable fields distinguish "absent" from
-// "wrong type". BindAsync reads the body as JSON whatever the Content-Type
-// header says, so plain `curl -d` works without -H 'Content-Type: application/json';
-// malformed JSON becomes a null body, which routes reject as invalid_body.
-public sealed record VectorBody(double? X, double? Y);
-
-public sealed record MoveRequest(VectorBody? Direction, double? Speed)
-{
-    public static async ValueTask<MoveRequest?> BindAsync(HttpContext context)
+    private static IResult ResumeSession(GameSession session)
     {
-        try { return await JsonSerializer.DeserializeAsync<MoveRequest>(context.Request.Body, ServerApi.Json); }
-        catch (JsonException) { return null; }
+        session.Resume();
+        return Results.Json(CommandResult.Ok(), Json);
+    }
+
+    private static async Task<IResult> StepSession(GameSession session)
+    {
+        CommandResult result = await session.Step();
+        return Results.Json(result, Json);
+    }
+
+    private static IResult SaveSession(GameSession session)
+    {
+        session.Save();
+        return Results.Json(CommandResult.Ok(), Json);
     }
 }
 
-public sealed record ConnectRequest(string? Target)
-{
-    public static async ValueTask<ConnectRequest?> BindAsync(HttpContext context)
-    {
-        try { return await JsonSerializer.DeserializeAsync<ConnectRequest>(context.Request.Body, ServerApi.Json); }
-        catch (JsonException) { return null; }
-    }
-}
+// Nullable properties distinguish missing fields from valid zero values.
+// The route handler explicitly reads and validates the JSON request body.
+public sealed record VectorBody(float? X, float? Y);
 
-public sealed record ReplaceComponentRequest(string? Slot, string? Component)
-{
-    public static async ValueTask<ReplaceComponentRequest?> BindAsync(HttpContext context)
-    {
-        try { return await JsonSerializer.DeserializeAsync<ReplaceComponentRequest>(context.Request.Body, ServerApi.Json); }
-        catch (JsonException) { return null; }
-    }
-}
-
-public sealed record SetEnabledRequest(bool? Enabled)
-{
-    public static async ValueTask<SetEnabledRequest?> BindAsync(HttpContext context)
-    {
-        try { return await JsonSerializer.DeserializeAsync<SetEnabledRequest>(context.Request.Body, ServerApi.Json); }
-        catch (JsonException) { return null; }
-    }
-}
+public sealed record MoveRequest(VectorBody? Direction, float? Speed);

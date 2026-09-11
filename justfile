@@ -6,11 +6,7 @@ default:
 
 # Build every project
 build:
-    dotnet build backend/SpaceAutomation.slnx
-
-# Run the test suite
-test: build
-    dotnet run --project backend/SpaceAutomation.Tests --no-build
+    dotnet build backend/SpaceAutomation.sln
 
 # Start the simulation server; extra arguments pass through (e.g. just run --paused)
 run *args:

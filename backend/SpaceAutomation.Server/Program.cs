@@ -15,17 +15,33 @@ try
 
     for (var i = 0; i < args.Length; i++)
     {
-        if (args[i] == "--paused") paused = true;
-
-        else if (args[i] is "--save" or "--port" && i + 1 < args.Length)
+        if (args[i] == "--paused")
         {
-            var value = args[++i];
-
-            if (args[i - 1] == "--save") save = value;
-
-            else if (!int.TryParse(value, out port) || port is < 1 or > 65535) { Console.Error.WriteLine("Invalid port"); return 2; }
+            paused = true;
         }
-        else { Console.Error.WriteLine("Usage: SpaceAutomation.Server [--save path] [--port n] [--paused]"); return 2; }
+
+        else if ((args[i] == "--save" || args[i] == "--port") && i + 1 < args.Length)
+        {
+            string option = args[i];
+            i++;
+            string value = args[i];
+
+            if (option == "--save")
+            {
+                save = value;
+            }
+
+            else if (!int.TryParse(value, out port) || port < 1 || port > 65535)
+            {
+                Console.Error.WriteLine("Invalid port");
+                return 2;
+            }
+        }
+        else
+        {
+            Console.Error.WriteLine("Usage: SpaceAutomation.Server [--save path] [--port n] [--paused]");
+            return 2;
+        }
     }
 
     var world = WorldStore.Load(save);
@@ -42,30 +58,53 @@ try
     session.Dispose();
     return 0;
 }
-catch (Exception e) { Console.Error.WriteLine(e.Message); return 1; }
+catch (Exception e)
+{
+    Console.Error.WriteLine(e.Message);
+    return 1;
+}
 
 // A tiny operator console for the terminal the server was started in. Without
 // a client connected you can still pause, step, save and quit.
 static void StartOpsConsole(GameSession session)
 {
-    if (Console.IsInputRedirected) return; // service mode: no operator at a terminal
+    if (Console.IsInputRedirected)
+    {
+        return; // service mode: no operator at a terminal
+    }
 
     new Thread(() =>
     {
         while (true)
         {
             var line = Console.ReadLine();
-            if (line is null) break;
+            if (line is null)
+            {
+                break;
+            }
 
             switch (line.Trim())
             {
-                case ":pause": session.Pause(); break;
-                case ":resume": session.Resume(); break;
-                case ":step": session.Step(); break;
-                case ":save": session.Save(); break;
-                case ":quit": session.Quit(); break;
-                case "": break;
-                default: Console.WriteLine("unknown control; available: :pause :resume :step :save :quit"); break;
+                case ":pause":
+                    session.Pause();
+                    break;
+                case ":resume":
+                    session.Resume();
+                    break;
+                case ":step":
+                    session.Step();
+                    break;
+                case ":save":
+                    session.Save();
+                    break;
+                case ":quit":
+                    session.Quit();
+                    break;
+                case "":
+                    break;
+                default:
+                    Console.WriteLine("unknown control; available: :pause :resume :step :save :quit");
+                    break;
             }
         }
     }) { IsBackground = true, Name = "ops" }.Start();

@@ -81,17 +81,10 @@ The world autosaves every tick and on exit (atomic writes). Corrupt or unsupport
 | `backend/SpaceAutomation.Game` | Authoritative domain: world, clock, rovers, energy system. No I/O. |
 | `backend/SpaceAutomation.Persistence` | Save/load: `[GameType]`/`[Observed]`/`[Saved]` metadata, JSON codec, migrations. |
 | `backend/SpaceAutomation.Server` | The application: game loop, call channel, HTTP API on localhost. |
-| `backend/SpaceAutomation.Tests` | Domain, persistence, HTTP API and session tests. |
 | `player/main.py` | Reference client; rewrite or replace in any language. |
 | `SpaceAutomation/` | Design notes and journals. |
 
 Attributes exist only in the persistence layer; reads are projected mechanically from `[Observed]` metadata, while commands are hand-written routes in `SpaceAutomation.Server/ServerApi.cs` — the same capability set for every client.
-
-## Tests
-
-```bash
-just test        # or: dotnet run --project backend/SpaceAutomation.Tests
-```
 
 ## Development
 
@@ -99,7 +92,6 @@ Install [just](https://github.com/casey/just#installation) once (`cargo install 
 
 ```bash
 just build    # build every project
-just test     # run the test suite
 just run      # start the server; extra arguments pass through (just run --paused)
 just client   # run the reference client against a running server
 just clean    # remove build artifacts

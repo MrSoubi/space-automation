@@ -15,10 +15,17 @@ public sealed record ServerState(long Tick, bool Running, IReadOnlyList<IReadOnl
 // becomes visible here without any API-side edits.
 public static class StateProjection
 {
-    public static ServerState Snapshot(World world, bool running) => new(
-        world.Tick,
-        running,
-        world.Objects.Values.OrderBy(x => x.Id, StringComparer.Ordinal).Select(Project).ToArray());
+    public static ServerState Snapshot(World world, bool running)
+    {
+        var objects = new List<IReadOnlyDictionary<string, object?>>();
+        var ordered = world.Objects.Values.OrderBy(obj => obj.Id, StringComparer.Ordinal);
+        foreach (var obj in ordered)
+        {
+            objects.Add(Project(obj));
+        }
+
+        return new ServerState(world.Tick, running, objects.ToArray());
+    }
 
     public static IReadOnlyDictionary<string, object?> Project(GameObject obj)
     {
@@ -35,9 +42,15 @@ public static class StateProjection
     // Also used for grid reports, whose values are plain data.
     public static object? Encode(object? value)
     {
-        if (value is null) return null;
+        if (value is null)
+        {
+            return null;
+        }
 
-        if (value is Vector2 v) return new Dictionary<string, object?> { ["x"] = v.X, ["y"] = v.Y };
+        if (value is Vector2 v)
+        {
+            return new Dictionary<string, object?> { ["x"] = v.X, ["y"] = v.Y };
+        }
 
         var type = value.GetType();
 
@@ -53,17 +66,35 @@ public static class StateProjection
             return fields;
         }
 
-        if (value is string text) return text;
+        if (value is string text)
+        {
+            return text;
+        }
 
-        if (value is bool boolean) return boolean;
+        if (value is bool boolean)
+        {
+            return boolean;
+        }
 
-        if (value is double or int or long) return value;
+        if (value is double or int or long or float)
+        {
+            return value;
+        }
 
         if (value is IDictionary map)
         {
             var fields = new Dictionary<string, object?>();
 
-            foreach (DictionaryEntry entry in map) fields[(string)entry.Key!] = Encode(entry.Value);
+            foreach (DictionaryEntry entry in map)
+            {
+                string? key = entry.Key as string;
+                if (key is null)
+                {
+                    throw new InvalidDataException("Observed dictionary keys must be strings");
+                }
+
+                fields[key] = Encode(entry.Value);
+            }
 
             return fields;
         }
@@ -72,7 +103,10 @@ public static class StateProjection
         {
             var items = new List<object?>();
 
-            foreach (var item in sequence) items.Add(Encode(item));
+            foreach (var item in sequence)
+            {
+                items.Add(Encode(item));
+            }
 
             return items;
         }

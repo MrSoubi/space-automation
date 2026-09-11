@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Launch Space Automation: builds if needed and runs the interactive TUI host.
-# Options: --save path  --script path  --budget n  --paused  --plain
+# Launch Space Automation: builds if needed and starts the simulation server
+# on localhost. Play it with any HTTP client, e.g. `python3 player/main.py`.
+# Options: --save path  --port n  --paused
 set -euo pipefail
 cd "$(dirname "$0")"
-exec dotnet run --project backend/SpaceAutomation.Host -- "$@"
+exec dotnet run --project backend/SpaceAutomation.Server -- "$@"

@@ -1,11 +1,12 @@
-using System.Collections.Concurrent;
+using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Nodes;
-using MoonSharp.Interpreter;
+using Microsoft.AspNetCore.Builder;
 using SpaceAutomation.Game;
 using SpaceAutomation.Game.Energy;
 using SpaceAutomation.Game.Objects;
-using SpaceAutomation.Host;
 using SpaceAutomation.Persistence;
+using SpaceAutomation.Server;
 
 int passed = 0, failed = 0;
 void Test(string name, Action body)
@@ -103,75 +104,146 @@ Test("a new attributed object round-trips through the save system", () => {
     } finally { Model.Objects.Remove("test_counter"); }
 });
 
-LuaHost LuaWorld(string code, World? world = null)
+// HTTP test harness: boots the real server on an ephemeral localhost port and
+// talks to it with a plain HttpClient, exactly like a player program would.
+(HttpClient Http, GameSession Session, WebApplication App) StartServer(World world, string savePath, bool paused = true, int tickMilliseconds = 1000)
 {
-    var host = new LuaHost(world ?? RoverWorld(), _ => { });
-    Check(host.RunCode(code) is null, "script must load");
-    return host;
+    var session = new GameSession(world, savePath, _ => { }, paused) { TickMilliseconds = tickMilliseconds };
+    var app = ServerApi.Build(session, port: 0);
+    app.StartAsync().GetAwaiter().GetResult();
+    var http = new HttpClient { BaseAddress = new Uri(app.Urls.First()) };
+    session.Start();
+    return (http, session, app);
 }
-Test("lua update drives the rover through the real domain", () => {
+(int Status, JsonElement? Json) Fetch(HttpClient http, string path)
+{
+    using var response = http.GetAsync(path).GetAwaiter().GetResult();
+    var raw = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+    return ((int)response.StatusCode, raw.Length == 0 ? null : JsonDocument.Parse(raw).RootElement.Clone());
+}
+(int Status, JsonElement? Json) Post(HttpClient http, string path, object? body = null)
+{
+    using var response = http.PostAsJsonAsync(path, body).GetAwaiter().GetResult();
+    var raw = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+    return ((int)response.StatusCode, raw.Length == 0 ? null : JsonDocument.Parse(raw).RootElement.Clone());
+}
+JsonElement Get(HttpClient http, string path) => Fetch(http, path).Json!.Value;
+JsonElement ObjectOf(JsonElement state, string id)
+{
+    foreach (var obj in state.GetProperty("objects").EnumerateArray())
+        if (obj.GetProperty("id").GetString() == id) return obj;
+    throw new Exception($"object {id} missing from state");
+}
+string? ReasonOf(JsonElement result) => result.TryGetProperty("reason", out var reason) ? reason.GetString() : null;
+void ShutDown(GameSession session, WebApplication app)
+{
+    session.Quit(); session.Wait(); session.Dispose();
+    app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+}
+
+Test("http commands drive the rover through the real domain", () => {
+    var savePath = Path.Combine(Path.GetTempPath(), "server-" + Guid.NewGuid() + ".json");
+    var (http, session, app) = StartServer(RoverWorld(), savePath);
+    try {
+        var move = Post(http, "/objects/r/move", new { direction = new { x = 1.0, y = 0.0 }, speed = 2.0 });
+        Check(move.Status == 200 && move.Json!.Value.GetProperty("accepted").GetBoolean());
+        var step = Post(http, "/session/step");
+        Check(step.Status == 200 && step.Json!.Value.GetProperty("accepted").GetBoolean());
+        var state = Get(http, "/state");
+        Check(state.GetProperty("tick").GetInt64() == 1);
+        Near(ObjectOf(state, "r").GetProperty("position").GetProperty("x").GetDouble(), 2);
+    } finally { ShutDown(session, app); }
+    var loaded = WorldStore.Load(savePath);
+    Check(loaded.Find<Rover>("r") is not null, "the session must save the world on exit");
+    Near(loaded.Find<Rover>("r")!.Position.X, 2);
+});
+Test("http command results mirror domain rejections", () => {
+    var (http, session, app) = StartServer(RoverWorld(), Path.Combine(Path.GetTempPath(), "server-" + Guid.NewGuid() + ".json"));
+    try {
+        string? Move(object? body) => ReasonOf(Post(http, "/objects/r/move", body).Json!.Value);
+        Check(Move(new { direction = new { x = 0.0, y = 0.0 }, speed = 1.0 }) == "invalid_direction");
+        Check(Move(new { direction = new { x = 1.0 }, speed = 1.0 }) == "invalid_direction"); // missing y
+        Check(Move(new { speed = 1.0 }) == "invalid_direction"); // missing direction
+        Check(Move(new { direction = new { x = 1.0, y = 0.0 }, speed = -1.0 }) == "invalid_speed");
+        Check(Move(new { direction = new { x = 1.0, y = 0.0 } }) == "invalid_speed"); // missing speed
+        Check(Post(http, "/objects/r/move", new { direction = new { x = 1.0, y = 0.0 }, speed = 1.0 }).Json!.Value.GetProperty("accepted").GetBoolean());
+        Check(Move(new { direction = new { x = 1.0, y = 0.0 }, speed = 1.0 }) == "movement_already_requested");
+        Check(Post(http, "/objects/r-battery/move", new { direction = new { x = 1.0, y = 0.0 }, speed = 1.0 }).Status == 400, "batteries cannot move");
+        Check(Post(http, "/objects/missing/move", new { direction = new { x = 1.0, y = 0.0 }, speed = 1.0 }).Status == 404);
+        var malformed = Post(http, "/objects/r/move", new { direction = new { x = 1.0, y = 0.0 }, speed = "fast" });
+        Check(malformed.Status == 400, "malformed bodies are binding failures");
+        Check(ReasonOf(malformed.Json!.Value) == "invalid_body");
+        Check(Post(http, "/objects/r/move", "not json at all").Status == 400, "unparseable bodies are rejected too");
+    } finally { ShutDown(session, app); }
+});
+Test("state projection exposes live observed values", () => {
+    var (http, session, app) = StartServer(RoverWorld(), Path.Combine(Path.GetTempPath(), "server-" + Guid.NewGuid() + ".json"));
+    try {
+        var state = Get(http, "/state");
+        Check(state.GetProperty("tick").GetInt64() == 0);
+        Check(state.GetProperty("running").GetBoolean() == false, "server starts paused in this test");
+        Check(state.GetProperty("objects").GetArrayLength() == 4);
+        var rover = ObjectOf(state, "r");
+        Check(rover.GetProperty("type").GetString() == "rover");
+        Near(rover.GetProperty("position").GetProperty("x").GetDouble(), 0);
+        Near(rover.GetProperty("speed_limit").GetDouble(), 3);
+        Near(rover.GetProperty("max_speed").GetDouble(), 3);
+        Check(rover.GetProperty("energy").GetProperty("storage_id").GetString() == "r-battery");
+        var battery = ObjectOf(state, "r-battery");
+        Near(battery.GetProperty("charge").GetDouble(), 20);
+        Near(battery.GetProperty("capacity").GetDouble(), 20);
+        Check(battery.GetProperty("installed_in").GetString() == "r");
+        var fetched = Fetch(http, "/objects/r");
+        Check(fetched.Status == 200 && fetched.Json!.Value.GetProperty("id").GetString() == "r");
+        Check(Fetch(http, "/objects/missing").Status == 404);
+        Post(http, "/session/step");
+        Near(ObjectOf(Get(http, "/state"), "r").GetProperty("position").GetProperty("x").GetDouble(), 0);
+        Check(ObjectOf(Get(http, "/state"), "r").GetProperty("last_move_result").GetString() is null, "no move request means no movement");
+    } finally { ShutDown(session, app); }
+});
+Test("grid queries work through http", () => {
+    var world = Scenario.Create();
+    var (http, session, app) = StartServer(world, Path.Combine(Path.GetTempPath(), "server-" + Guid.NewGuid() + ".json"));
+    try {
+        var grid = Get(http, "/objects/hub/grid_status");
+        Check(grid.GetProperty("members")[0].GetString() == "hub");
+        var state = Get(http, "/state");
+        Check(state.GetProperty("objects").GetArrayLength() == world.Objects.Count, "every object appears in the state");
+        var types = state.GetProperty("objects").EnumerateArray().Select(obj => obj.GetProperty("type").GetString()!).ToList();
+        Check(types.Count(type => type == "rover") == 2, "the fleet is filterable client-side");
+        Check(types.Count(type => type == "battery") == 4);
+        Check(Fetch(http, "/objects/rover-1-motor/grid_status").Status == 200, "any energy node can query its grid");
+    } finally { ShutDown(session, app); }
+});
+Test("connect, disconnect and set_enabled work through http", () => {
     var world = RoverWorld();
-    var host = LuaWorld("""
-        function startup() end
-        function update(dt) station.get_fleet()[1]:move(vector(1, 0), 2) end
-        """, world);
-    Check(host.CallStartup() is null); Check(host.CallUpdate(1) is null);
-    world.Advance(); Near(world.Find<Rover>("r")!.Position.X, 2);
+    world.Add(new Hub { Id = "hub" });
+    var (http, session, app) = StartServer(world, Path.Combine(Path.GetTempPath(), "server-" + Guid.NewGuid() + ".json"));
+    try {
+        Check(Post(http, "/objects/r/connect", new { target = "hub" }).Json!.Value.GetProperty("accepted").GetBoolean());
+        Check(ReasonOf(Post(http, "/objects/r/move", new { direction = new { x = 1.0, y = 0.0 }, speed = 1.0 }).Json!.Value) == "connected_to_grid");
+        Check(Post(http, "/objects/r/disconnect", new { target = "hub" }).Json!.Value.GetProperty("accepted").GetBoolean());
+        Check(ReasonOf(Post(http, "/objects/r/connect", new { }).Json!.Value) == "invalid_energy_endpoint");
+        Check(Post(http, "/objects/r-solar-panel/set_enabled", new { enabled = false }).Json!.Value.GetProperty("accepted").GetBoolean());
+        Check(ObjectOf(Get(http, "/state"), "r-solar-panel").GetProperty("enabled").GetBoolean() == false);
+        Check(ReasonOf(Post(http, "/objects/r-solar-panel/set_enabled", new { }).Json!.Value) == "invalid_enabled");
+    } finally { ShutDown(session, app); }
 });
-Test("lua hangs are aborted by the instruction budget", () => {
-    var world = RoverWorld();
-    var host = LuaWorld("function startup() end function update(dt) while true do end end", world);
-    host.InstructionBudget = 5000;
-    Check(host.CallUpdate(1) is not null, "runaway update must be aborted");
-    world.Advance(); Check(world.Find<Rover>("r") is not null, "world survives the abort");
-    host.InstructionBudget = LuaHost.DefaultInstructionBudget;
-    var (value, failure) = host.Eval("return 1 + 1");
-    Check(failure is null && value!.Number == 2, "script usable after abort");
-});
-Test("the lua repl shares the live namespace with main.lua", () => {
-    var host = LuaWorld("function startup() end function update(dt) end");
-    Check(host.Eval("x = 41").Failure is null);
-    var (value, failure) = host.Eval("x + 1");
-    Check(failure is null && value!.Number == 42);
-});
-Test("lua command results mirror domain rejections", () => {
-    var host = LuaWorld("function startup() end function update(dt) end");
-    string? Reason(string code) { var (v, f) = host.Eval(code); Check(f is null); return v!.Table.Get("reason").Type == DataType.Nil ? null : v.Table.Get("reason").String; }
-    bool Accepted(string code) { var (v, f) = host.Eval(code); Check(f is null); return v!.Table.Get("accepted").Boolean; }
-    Check(!Accepted("station.get_object('r'):move(vector(0, 0), 1)"));
-    Check(Reason("station.get_object('r'):move(vector(0, 0), 1)") == "invalid_direction");
-    Check(Reason("station.get_object('r'):move('nope', 1)") == "invalid_direction");
-    Check(Reason("station.get_object('r'):move(vector(1, 0), -1)") == "invalid_speed");
-    Check(Reason("station.get_object('r'):move(vector(1, 0), true)") == "invalid_speed");
-    Check(Accepted("station.get_object('r'):move(vector(1, 0), 1)"));
-    Check(Reason("station.get_object('r'):move(vector(1, 0), 1)") == "movement_already_requested");
-});
-Test("lua proxies expose live state and stable identity", () => {
-    var world = RoverWorld();
-    var host = LuaWorld("function startup() end function update(dt) end", world);
-    Check(host.Eval("return station.get_object('r').position.x").Value!.Number == 0);
-    Check(host.Eval("return station.get_object('r').battery.charge").Value!.Number == 20);
-    Check(host.Eval("return station.get_object('r').energy.storage_id").Value!.String == "r-battery");
-    Check(host.Eval("return station.get_object('r').installed_in").Value!.Type == DataType.Nil);
-    Check(host.Eval("return station.get_object('missing')").Value!.Type == DataType.Nil);
-    Check(host.Eval("return station.get_object('r') == station.get_object('r')").Value!.Boolean);
-    world.Advance();
-    Check(host.Eval("return station.get_object('r').position.x").Value!.Number == 0, "no move request means no movement");
-});
-Test("grid queries work through lua", () => {
-    var host = LuaWorld("function startup() end function update(dt) end", Scenario.Create());
-    Check(host.Eval("return station.get_object('hub'):grid_status().members[1]").Value!.String == "hub");
-    Check(host.Eval("return #station.get_fleet()").Value!.Number == 2);
-    Check(host.Eval("return #station.get_objects('battery')").Value!.Number == 4);
-    Check(host.Eval("return station.get_tick()").Value!.Number == 0);
-});
-Test("lua load and runtime failures are reported, not thrown", () => {
-    var host = LuaWorld("function startup() end function update(dt) error('boom') end");
-    var failure = host.CallUpdate(1);
-    Check(failure is not null && failure.Traceback.Contains("boom"));
-    Check(host.RunCode("function (") is not null, "syntax errors must be reported");
-    var missing = new LuaHost(RoverWorld(), _ => { }).RunCode("function update(dt) end");
-    Check(missing is not null && missing.Message.Contains("startup"));
+Test("http commands land between ticks while auto-running", () => {
+    var savePath = Path.Combine(Path.GetTempPath(), "server-" + Guid.NewGuid() + ".json");
+    var (http, session, app) = StartServer(RoverWorld(), savePath, paused: false, tickMilliseconds: 50);
+    try {
+        WaitUntil(() => session.State.Running && session.State.Tick >= 1, "auto ticks");
+        var move = Post(http, "/objects/r/move", new { direction = new { x = 1.0, y = 0.0 }, speed = 1.0 });
+        Check(move.Status == 200 && move.Json!.Value.GetProperty("accepted").GetBoolean(), "commands are admitted while running");
+        WaitUntil(() => session.State.Tick >= 2 && ObjectOf(Get(http, "/state"), "r").GetProperty("position").GetProperty("x").GetDouble() >= 1, "move lands at the next tick");
+        Check(ReasonOf(Post(http, "/session/step").Json!.Value) == "not_paused", "stepping needs a paused session");
+        Post(http, "/session/pause");
+        WaitUntil(() => !session.State.Running, "pause takes effect");
+        Check(Post(http, "/session/step").Json!.Value.GetProperty("accepted").GetBoolean());
+    } finally { ShutDown(session, app); }
+    var loaded = WorldStore.Load(savePath);
+    Check(loaded.Find<Rover>("r") is not null, "the running session saved on exit");
 });
 
 static void WaitUntil(Func<bool> condition, string description = "condition")
@@ -183,57 +255,6 @@ static void WaitUntil(Func<bool> condition, string description = "condition")
         Thread.Sleep(10);
     }
 }
-Test("game session steps ticks, evaluates lua and saves on exit", () => {
-    var entry = Path.Combine(Path.GetTempPath(), "session-" + Guid.NewGuid() + ".lua");
-    var savePath = Path.Combine(Path.GetTempPath(), "session-" + Guid.NewGuid() + ".json");
-    File.WriteAllText(entry, """
-        function startup() end
-        function update(dt) station.get_fleet()[1]:move(vector(1, 0), 2) end
-        """);
-    var output = new ConcurrentQueue<string>();
-    var session = new GameSession(RoverWorld(), entry, savePath, LuaHost.DefaultInstructionBudget, output.Enqueue, startPaused: true);
-    session.Start();
-    session.EvaluateLine("station.get_object('r'):move(vector(1, 0), 2)");
-    session.Step();
-    WaitUntil(() => output.Any(line => line.Contains("tick 1")), "first tick output");
-    Near(session.World.Find<Rover>("r")!.Position.X, 2);
-    session.Quit(); session.Wait(); session.Dispose();
-    var loaded = WorldStore.Load(savePath);
-    Check(loaded.Find<Rover>("r") is not null, "session must save the world on exit");
-});
-Test("game session auto-runs at the configured tick rate", () => {
-    var entry = Path.Combine(Path.GetTempPath(), "session-" + Guid.NewGuid() + ".lua");
-    var savePath = Path.Combine(Path.GetTempPath(), "session-" + Guid.NewGuid() + ".json");
-    File.WriteAllText(entry, """
-        function startup() end
-        function update(dt) station.get_fleet()[1]:move(vector(1, 0), 2) end
-        """);
-    var output = new ConcurrentQueue<string>();
-    var session = new GameSession(RoverWorld(), entry, savePath, LuaHost.DefaultInstructionBudget, output.Enqueue, startPaused: false) { TickMilliseconds = 50 };
-    session.Start();
-    WaitUntil(() => session.World.Tick >= 3, "three auto ticks");
-    Check(session.World.Find<Rover>("r")!.Position.X >= 2, "auto ticks must run update and advance");
-    session.Quit(); session.Wait(); session.Dispose();
-});
-Test("game session latches on update errors and recovers via restart", () => {
-    var entry = Path.Combine(Path.GetTempPath(), "session-" + Guid.NewGuid() + ".lua");
-    var savePath = Path.Combine(Path.GetTempPath(), "session-" + Guid.NewGuid() + ".json");
-    File.WriteAllText(entry, "function startup() end function update(dt) error('boom') end");
-    var output = new ConcurrentQueue<string>();
-    var session = new GameSession(RoverWorld(), entry, savePath, LuaHost.DefaultInstructionBudget, output.Enqueue, startPaused: true);
-    session.Start();
-    session.Step();
-    WaitUntil(() => session.Latched, "latch after failed update");
-    WaitUntil(() => output.Any(line => line.Contains("boom")), "error traceback");
-    session.Resume();
-    WaitUntil(() => output.Any(line => line.Contains("restart required")), "resume refused while latched");
-    File.WriteAllText(entry, "function startup() end function update(dt) station.get_fleet()[1]:move(vector(1, 0), 1) end");
-    session.Restart();
-    WaitUntil(() => !session.Latched && output.Any(line => line.Contains("runtime restarted")), "restart with fixed script");
-    session.Step();
-    WaitUntil(() => session.World.Tick >= 1 && session.World.Find<Rover>("r")!.Position.X >= 1, "tick after restart");
-    session.Quit(); session.Wait(); session.Dispose();
-});
 Console.WriteLine($"{passed} passed, {failed} failed");
 return failed == 0 ? 0 : 1;
 

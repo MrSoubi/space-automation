@@ -12,9 +12,13 @@ build:
 test: build
     dotnet run --project backend/SpaceAutomation.Tests --no-build
 
-# Launch the game; extra arguments pass through (e.g. just run --paused)
+# Start the simulation server; extra arguments pass through (e.g. just run --paused)
 run *args:
-    dotnet run --project backend/SpaceAutomation.Host -- {{args}}
+    dotnet run --project backend/SpaceAutomation.Server -- {{args}}
+
+# Run the reference player client against a running server
+client:
+    python3 player/main.py
 
 # Remove build artifacts
 clean:

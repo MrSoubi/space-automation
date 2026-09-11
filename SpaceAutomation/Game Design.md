@@ -42,7 +42,7 @@ There is no deadline, enemy pressure, or requirement for quick reactions. Player
 
 ### The player builds the tools
 
-Interaction is through commands and player-written scripts. A terminal workspace provides a command input field, an output panel, and a small session-name/current-tick status bar. It provides no map renderer, equipment dashboard, or graphical management controls. If a player wants a 2D map, fleet report, or management tool, they write it themselves.
+Interaction is through the simulation's HTTP API. The game provides no map renderer, equipment dashboard, terminal workspace, or graphical management controls — every client, from a simple automation script to a map, is a program the player writes. If a player wants a 2D map, fleet report, or management tool, they build it themselves, in any language, and all clients are equal before the API.
 
 The information needed to understand the world and diagnose a stalled operation must remain available through queries. This freedom depends on accessible information and clear machine behavior.
 
@@ -94,9 +94,9 @@ The player begins with individual commands, then builds reusable behaviors and c
 
 Movement illustrates the principle: vehicles provide directional movement within their speed capabilities. Destination-based navigation is a player-created behavior. Improved equipment expands physical capabilities; the player develops the intelligence that uses them.
 
-Scripts are written in an external editor chosen by the player. Reference documentation is available inline in supporting IDEs; conceptual explanations and examples live in Markdown files. Documentation is not provided through an in-game interpreter help system.
+Automation is an external program in any language, written in the editor of the player's choice, talking to the simulation over its HTTP API. The API itself is the reference documentation; conceptual explanations and examples live in Markdown files. Documentation is not provided through an in-game help system, and no client receives capabilities another lacks.
 
-The player receives one minimal starting script. Organizing automation into controllers, reusable modules, or event systems is their responsibility. Equipment does not arrive with an automatically managed player-script lifecycle.
+The player receives one minimal reference client. Organizing automation into controllers, reusable modules, or event systems is their responsibility, as is building tools like maps, dashboards, and fleet reports. Equipment does not arrive with an automatically managed player-script lifecycle.
 
 ## Pace and optional challenges
 

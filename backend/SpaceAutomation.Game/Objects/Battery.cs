@@ -6,9 +6,15 @@ public class Battery : EnergyEquipment, IStorage
 {
     [Observed("storage", "Battery capacity and charge in joules.")]
     public EnergyStorage Storage { get; set; } = new();
-    [Observed("charge", "Stored energy in joules.", Persist = false)] public double Charge => Storage.Charge;
-    [Observed("capacity", "Capacity in joules.", Persist = false)] public double Capacity => Storage.Capacity;
+    
+    [Observed("charge", "Stored energy in joules.", Persist = false)]
+    public double Charge => Storage.Charge;
+
+    [Observed("capacity", "Capacity in joules.", Persist = false)]
+    public double Capacity => Storage.Capacity;
+
     internal override void InitializePort() => Energy.StorageId ??= Id;
+
     public override void ValidateState()
     {
         base.ValidateState();

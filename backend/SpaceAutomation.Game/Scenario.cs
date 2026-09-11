@@ -12,6 +12,7 @@ public static class Scenario
         var rover = new Rover { Id = id, Position = position, Energy = new() { StorageId = battery.Id, ConsumerId = motor.Id, SourceId = panel.Id } };
         return [rover, battery, motor, panel];
     }
+    
     public static World Create()
     {
         var world = new World([

@@ -63,32 +63,30 @@ Objects can be added in any order because references are checked after assembly 
 
 ## Player commands
 
-```lua
-local rover = station.get_fleet()[1]
-local battery = station.get_object(rover.energy.storage_id)
-print(battery.charge, battery.capacity)
-print(rover.energy.source_id, rover.energy.consumer_id)
+```bash
+B=http://127.0.0.1:8377
+curl $B/objects/rover-1                                # energy: {connections, source_id, consumer_id, storage_id}
+curl $B/objects/rover-1-battery                        # charge, capacity, installed_in
 ```
 
-`energy` reads live from the world through the proxy's metatable; returned tables are plain copies, so editing them changes nothing. Use commands to change state.
+The state is a projection of the live world — read it as often as you like; change it only through commands.
 
 ### Connect a star network
 
-```lua
-hub = station.get_object("hub")
-hub:connect("battery-a")
-hub:connect("battery-b")
+```bash
+curl -X POST $B/objects/hub/connect -d '{"target":"battery-a"}'
+curl -X POST $B/objects/hub/connect -d '{"target":"battery-b"}'
 ```
 
 Every port supports multiple connections. Connections are undirected and reciprocal. Connected paths form grids; direct links from every pair are unnecessary. Removing a link splits the grid only if no other path remains. Cycles are valid and never duplicate stored energy or production.
 
-```lua
-rover:connect("hub")
-return hub:grid_status()
-rover:disconnect("hub")
+```bash
+curl -X POST $B/objects/rover-1/connect -d '{"target":"hub"}'
+curl $B/objects/hub/grid_status     # {members, generation, demand, charge, capacity}
+curl -X POST $B/objects/rover-1/disconnect -d '{"target":"hub"}'
 ```
 
-`grid_status()` reports members, generation per tick, current demand, charge, and capacity, computed from current authoritative state.
+`grid_status` reports members, generation per tick, current demand, charge, and capacity, computed from current authoritative state.
 
 Installed components connect externally through their host — connect the rover, not its installed battery. This prevents a removed cable from leaving a hidden external battery link. Detached components can be linked independently.
 
@@ -98,9 +96,9 @@ The current foundation has no cable length, connection-count limit, cable cost, 
 
 While the rover is at the component's position, unconnected, with no pending movement:
 
-```lua
-rover:replace_component("battery", "spare-battery")
-rover:replace_component("motor", nil)      -- nil removes the component
+```bash
+curl -X POST $B/objects/rover-1/replace_component -d '{"slot":"battery","component":"spare-battery"}'
+curl -X POST $B/objects/rover-1/replace_component -d '{"slot":"motor","component":null}'   # null removes the part
 ```
 
 Prototype replacement rules:

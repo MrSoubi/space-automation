@@ -14,70 +14,58 @@ Related: [[Game Design]] · [[First Mission]] · [[Developing Game Objects]] · 
 
 ## Language and workspace
 
-C# (.NET 10) is the implementation language of the simulation and application. Players write **Lua** scripts in a dedicated folder, using their preferred external editor.
+C# (.NET 10) implements the simulation and the server. The **game is an HTTP API**: players write external programs in any language and any editor, talking to the simulation over localhost HTTP with JSON.
 
-The player-facing API is hand-written and explicit (`SpaceAutomation.Host/LuaApi.cs`); no schema, no generated wrappers, no reflection-driven command layer. Reflection appears only inside the save system, reading `[GameType]`/`[Observed]`/`[Saved]`/`[ValueType]` metadata.
+Reads are projected mechanically from the same `[Observed]` metadata the save system persists; commands are hand-written routes in `SpaceAutomation.Server/ServerApi.cs`. No schema, no generated proxies, no reflection-driven command layer outside the save/projection machinery.
 
-There is no built-in documentation browser or in-game help. Markdown documents provide concepts and examples; the interpreter is the inspection tool.
+There is no built-in documentation browser, map, or dashboard. Markdown documents provide concepts and examples; the API and the player's own tools are the inspection surface.
 
 ## Application architecture
 
-One process. `./space-automation` (or `just run`) builds if needed and starts `SpaceAutomation.Host`, which owns three threads:
+One process, two roles. `./space-automation` (or `just run`) builds if needed and starts `SpaceAutomation.Server`, which owns:
 
-| Thread | Responsibility |
-| --- | --- |
-| Game | The world, the clock, the Lua runtime, tick admission, saving. The only thread that touches authoritative state. |
-| UI | Terminal.Gui: buttons, tabs, log, live object table. Reads published snapshots and drains an output queue on a 100 ms timer. |
-| Input | Terminal line reading; lines are queued as commands for the game thread. |
+- **The game thread** — the world, the clock, the command queue, and saving. The only thread that touches authoritative state.
+- **Kestrel on 127.0.0.1** (default port 8377, `--port` to change) — HTTP handlers submit *calls* to the game thread and answer from the published snapshot. Request handlers never touch the world.
 
-The old three-process design existed for one reason: killing a hung player runtime. That guarantee is now provided in-process — every Lua invocation runs under an **instruction budget** (MoonSharp's per-instruction debugger hook), so a runaway `while true do end` is aborted deterministically, the world is unharmed, and the session pauses until an explicit restart. No Unix sockets, no wire protocol, no request identifiers; terminals submit commands through a plain queue (`GameSession`).
+The old designs bracket this one. The first prototype (three processes, Unix sockets, generated Python clients) failed on mechanics. The single-process C# host (embedded Lua, instruction budgets, Terminal.Gui TUI) fixed the mechanics but locked players into a sandboxed runtime. The server keeps that host's world, persistence, and clock, and replaces the embedded runtime with an open surface — the first prototype's shape with boring, universal mechanics. A hung or slow client cannot stall the simulation, because the simulation never calls into player code: **isolation replaces the instruction budget**.
 
-A plain line-based console replaces the TUI automatically when streams are redirected (`--plain` forces it), which keeps the game scriptable and testable.
+A tiny ops console (`:pause :resume :step :save :quit`) stays available in the server's own terminal when stdin is attached; clients can do the same over HTTP.
 
 ## Startup sequence
 
 1. Load the last saved world, or create the starter scenario.
-2. Create `player/main.lua` if missing (never overwrite an existing one).
-3. Load it and call `startup()` once; a load or startup failure latches the session paused until restart.
-4. Begin ticking and accept interpreter input.
+2. Bind Kestrel to localhost and print the address.
+3. Begin ticking and accept HTTP requests.
 
 Simulation time excludes time spent paused. There is no offline progress.
 
-## One player entry point
+## The player surface
 
-```lua
--- player/main.lua
-function startup()
-end
-
-function update(dt)
-end
+```
+GET  /state                          → {tick, running, objects:[…]}   (published snapshot)
+GET  /objects/{id}                   → one object's observed fields
+GET  /objects/{id}/grid_status       → grid report
+POST /objects/{id}/move              {direction:{x,y}, speed}
+POST /objects/{id}/connect           {target}
+POST /objects/{id}/disconnect        {target}
+POST /objects/{id}/replace_component {slot, component|null}
+POST /objects/{id}/set_enabled       {enabled}
+POST /session/pause · resume · step · save
 ```
 
-`startup()` runs once per runtime load (also after `:restart`). `update(dt)` runs once per tick, before the physical step, and may issue commands. All other organization — controllers, modules, schedulers — is player code; the game attaches scripts to nothing and manages no registrations.
+Every command returns `{"accepted":true}` or `{"accepted":false,"reason":"…"}` — the domain's own `CommandResult` values. Rejection reasons are part of the public API: stable and lowercase. Unknown ids answer `404 unknown_object`, unsupported commands `400 unsupported_object`, unparseable bodies `400 invalid_body`; JSON bodies are accepted regardless of the `Content-Type` header so plain `curl -d` works.
 
-## Interpreter
+`/state` serves an immutable snapshot published after **every tick and every command** — the only world state request handlers ever read. Commands execute on the game thread through a request/response queue (a `TaskCompletionSource` completed by the game thread), so callers get their synchronous answer; worst-case latency while running is the time to the next tick boundary.
 
-Interpreter submissions execute in the **same global environment** as `main.lua` (MoonSharp `Globals`). Assignments affect the variables `update()` later reads; a player function called from the prompt submits commands normally. Bare expressions echo their value; `↑`/`↓` browse history.
+## Commands and observations
 
-An exception from `startup()` or `update()` reports a traceback and latches the session paused; already-accepted commands remain accepted, and the interpreter stays available for inspection. A REPL error only reports — a typo should not stop the world. Recovery requires an explicit restart, which reloads `main.lua` from disk, re-calls `startup()`, and stays paused.
-
-## World commands and observations
-
-Player actions are method calls through the station API, validated by the simulation:
-
-```lua
-local result = rover:move(vector(1, 0), 2)
--- {accepted=true}  or  {accepted=false, reason="invalid_speed"}
-```
-
-Acceptance is synchronous; **completion happens over simulation time**. Reading `rover.position` immediately after an accepted move still shows the old position — resolution happens in the tick's allocation phase.
+Player actions are POSTs validated by the simulation. Acceptance is synchronous; **completion happens over simulation time**. Reading a rover right after an accepted move still shows the old position — the move resolves in the tick's allocation phase.
 
 The first accepted movement per rover per tick wins (`movement_already_requested`); slots reset when the tick commits. Paused commands reserve slots without advancing.
 
 ## Movement contract
 
-Positions are continuous 2D meters; `vector(x, y)` builds values. `max_speed` is meters per tick:
+Positions are continuous 2D meters. `max_speed` is meters per tick:
 
 ```text
 position_next = position + normalized(direction) * min(speed, max_speed)
@@ -87,22 +75,16 @@ Direction is normalized, so its magnitude cannot extend travel. Requested speed 
 
 ## Simulation time
 
-One tick per wall-clock second while running; pause and single-step are first-class. A tick round is: admit queued interpreter lines, run `update(dt)`, resolve systems (`PrepareTick` → energy → `Update`), advance the clock, autosave, publish state. Slow player code slows real time rather than stretching `dt` or skipping updates; the instruction budget aborts instead of hanging.
+One tick per wall-clock second while running; pause and single-step are first-class. A tick round is: drain queued calls, resolve systems (`PrepareTick` → energy → `Update`), advance the clock, autosave, publish state. The server never waits for a client — a client that is slow, paused in a debugger, or hung simply misses ticks. Player tools polling a few times per second keep up trivially.
 
-## Reload and persistence
+## Persistence
 
-The game manages the lifecycle of `main.lua` only; imported player modules and live variables are not reloaded piecemeal. `:restart` (or the Restart button) recreates the Lua runtime from disk.
+The authoritative world autosaves every tick and on exit, atomically. Corrupt or unsupported saves are reported and preserved, never overwritten. Save format is versioned; upgrades happen in memory on load (`SaveMigrations`). Players are stateless: their programs can stop and restart freely, and everything that matters lives in the save.
 
-The authoritative world autosaves every tick and on exit, atomically. Corrupt or unsupported saves are reported and preserved, never overwritten. Player variables are never persisted. Save format is versioned; upgrades happen in memory on load (`SaveMigrations`).
+## Extension boundary
 
-## Terminal
-
-Terminal.Gui v2 provides a mouse-driven TUI: a Console tab (log, results), an Objects tab (live world table), a Lua input line, and buttons replacing commands (Pause/Resume, Step, Restart, Quit). `:pause :resume :step :restart :quit` remain accepted in the input line; `Ctrl+Q` quits.
-
-## Gameplay extension boundary
-
-Equipment classes live in `SpaceAutomation.Game/Objects/`, shared systems in `Energy/` (for energy) or wired through `World.Advance` (for new domains). Registration is `[GameType]`; persistence is generic over `[Observed]`/`[Saved]` fields; the player surface is hand-written in `LuaApi.cs`. See [[Developing Game Objects]] for the complete recipes (objects, systems, commands, capabilities) and a full walkthrough.
+Equipment classes live in `SpaceAutomation.Game/Objects/`, shared systems in `Energy/` (for energy) or wired through `World.Advance` (for new domains). Registration is `[GameType]`; persistence and the `/state` projection are generic over `[Observed]` fields — new equipment becomes queryable with no API-side edits; commands are hand-written routes. See [[Developing Game Objects]] for the complete recipes and a full walkthrough.
 
 ## Energy implementation
 
-[[Energy System]] documents the capability records, real replaceable component objects, and the shared allocation phase. Object `PrepareTick()` declares demand, the energy system allocates once per connected grid, and `Update()` performs the work with the energy actually received.
+[[Energy System]] documents the capability records, real replaceable component objects, and the shared allocation phase. `PrepareTick()` declares demand, the energy system allocates once per connected grid, and `Update()` performs the work with the energy actually received.

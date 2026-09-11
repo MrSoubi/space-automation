@@ -10,8 +10,8 @@ status: implemented-prototype
 
 Related: [[Technical Foundations]] · [[Game Design]] · [[First Mission]] · [[Developing Game Objects]]
 
-> [!warning] Superseded
-> The three-process Python prototype documented here was replaced by the single-process C# host (C# simulation, Lua player scripts, in-process interpreter budget instead of runtime killing). This page remains as the prototype's historical record; [[Technical Foundations]] describes the current architecture.
+> [!warning] Superseded — twice
+> The three-process Python prototype documented here was first replaced by a single-process C# host (embedded Lua, Terminal.Gui TUI), which was then itself replaced by the current simulation **server**: the game is an HTTP API, and player programs — in any language — are external clients. The prototype's shape came back with boring, universal mechanics: no Unix sockets, no wire protocol, no generated clients. This page remains as the historical record; [[Technical Foundations]] describes the current architecture.
 
 > [!abstract] Goal
 > Launch one Linux application that runs three communicating processes, executes a player's `main.py`, and provides a Python interpreter in that script's live namespace. Demonstrate that both automation and manual commands can inspect and control the same simulated vehicles.

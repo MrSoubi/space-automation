@@ -130,4 +130,4 @@ The next sector should increase distances and the number of sites, providing rea
 - Starter unlock catalogue and manufacturing costs.
 - Probe installation and use requirements.
 - Initial energy, cargo, and vehicle speed values.
-- Content of the external introductory guide and minimal script examples.
+- Content of the external introductory guide and minimal client examples.

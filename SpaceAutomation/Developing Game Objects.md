@@ -11,7 +11,7 @@ status: implemented
 Related: [[Technical Foundations]] · [[Energy System]] · [[First Mission]]
 
 > [!abstract] Start here
-> Gameplay lives in `backend/SpaceAutomation.Game`. A game object is a plain C# class: fields, ordinary methods, and two lifecycle hooks. The persistence layer saves it automatically; the host exposes it to Lua players. No code generation, no socket handlers.
+> Gameplay lives in `backend/SpaceAutomation.Game`. A game object is a plain C# class: fields, ordinary methods, and two lifecycle hooks. The persistence layer saves it automatically; the server's projection makes it readable over HTTP with zero API code. No code generation, no socket handlers.
 
 ## Where to work
 
@@ -21,9 +21,9 @@ Related: [[Technical Foundations]] · [[Energy System]] · [[First Mission]]
 | `backend/SpaceAutomation.Game/Energy/` | Ports, capability records, capability interfaces, `EnergySystem`. |
 | `backend/SpaceAutomation.Game/World.cs` | Object collection, clock, tick phases, system wiring. |
 | `backend/SpaceAutomation.Game/Scenario.cs` | Objects present in a new expedition (existing saves are unaffected). |
-| `backend/SpaceAutomation.Host/LuaApi.cs` | The hand-written player-facing Lua surface. |
-| `backend/SpaceAutomation.Tests/Program.cs` | Equipment rules and save round-trips. |
-| `player/main.lua` | Player automation, never game implementation. |
+| `backend/SpaceAutomation.Server/ServerApi.cs` | Hand-written command routes; reads need nothing here. |
+| `backend/SpaceAutomation.Tests/Program.cs` | Equipment rules, save round-trips, HTTP surface. |
+| `player/main.py` | Reference client, never game implementation. |
 
 ## Define an object
 
@@ -70,28 +70,36 @@ Objects run in stable ID order. Declare in `PrepareTick`, act in `Update`; never
 
 ## Expose it to players
 
-The Lua API is hand-written in `SpaceAutomation.Host/LuaApi.cs`. Every proxy is one table with a `__index` metamethod, so data is always read live from the world. Adding members means adding cases to the type's block in `Index`:
+Reads and writes travel different roads, by design.
+
+**Reads are free.** `GET /state` and `GET /objects/{id}` are projected mechanically from `[Observed]` declarations — the same metadata the save codec persists. Mark a property `[Observed]` (with `Persist = false` for computed values like `charge` or `max_speed`) and it appears in every client's next poll. There is no projection code to write and nothing can drift.
+
+**Commands are hand-written routes** in `SpaceAutomation.Server/ServerApi.cs`. Each route binds a small request record, validates the shape, and calls the domain method through the session's call channel — the domain answers with the `CommandResult` the client sees:
 
 ```csharp
-if (obj is Battery battery) switch (key.String)
+app.MapPost("/objects/{id}/deposit", (string id, DepositRequest? body) =>
+    WithObject<CargoStorage>(session, id, async storage =>
+    {
+        if (body is null)
+            return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+
+        if (body.Amount is not { } amount)
+            return Results.Json(CommandResult.Reject("invalid_amount"), Json);
+
+        return Results.Json(await session.Call(_ => storage.Deposit(amount)), Json);
+    }));
+
+public sealed record DepositRequest(double? Amount)
 {
-    case "charge":   return DynValue.NewNumber(battery.Charge);
-    case "capacity": return DynValue.NewNumber(battery.Capacity);
+    public static async ValueTask<DepositRequest?> BindAsync(HttpContext context)
+    {
+        try { return await JsonSerializer.DeserializeAsync<DepositRequest>(context.Request.Body, ServerApi.Json); }
+        catch (JsonException) { return null; }
+    }
 }
 ```
 
-Callable commands return the standard result table. Proxy methods are called with `:`, so `args[0]` is the proxy itself and player arguments start at `args[1]`:
-
-```csharp
-case "deposit": return Method("deposit", args =>
-{
-    var amount = ReadNumber(args[1]);
-    if (amount is null) return Result(CommandResult.Reject("invalid_amount"));
-    return Result(cargo.Deposit(amount.Value));
-});
-```
-
-Check Lua argument types before calling the domain — wrong shapes become the same rejection reasons the domain uses. Domain rules (ranges, finiteness, slot conflicts) stay in the domain class; the Lua layer only translates types.
+`WithObject<T>` resolves the target on the game thread and answers `404 unknown_object` / `400 unsupported_object` before your route runs. Null check the body (`BindAsync` returns null for unparseable JSON), check each field for absence, and turn both into the same rejection reasons the domain uses — `invalid_amount`, not a framework error. Domain rules (ranges, finiteness, slot conflicts) stay in the domain class; the route only translates shapes.
 
 ## Place it in a new world
 
@@ -139,12 +147,11 @@ Test("cargo storage deposits, withdraws and validates", () => {
 });
 ```
 
-Cover the rules, the rejections, and the save round-trip. Then `just test`. Use `just run --paused --save /tmp/...` to try it live; from the Lua prompt:
+Cover the rules, the rejections, and the save round-trip. Then `just test`. Use `just run --paused --save /tmp/...` to try it live, from any shell:
 
-```lua
-s = station.get_object("hub-storage")
-s:deposit(10)
-return s.contents
+```bash
+curl -X POST localhost:8377/objects/hub-storage/deposit -d '{"amount": 10}'
+curl localhost:8377/objects/hub-storage          # {"id":"hub-storage","contents":10,...}
 ```
 
 ## Complete walkthrough: hub storage
@@ -152,8 +159,8 @@ return s.contents
 First Mission gives the hub surface storage. Four small edits:
 
 1. **`Objects/CargoStorage.cs`** — the class shown above (`: GameObject`, `Capacity`/`Contents` observed, `Deposit`/`Withdraw` returning `CommandResult`, `ValidateState` rejecting negative or overflowing contents).
-2. **`LuaApi.cs`** — the `contents`, `capacity`, `deposit`, `withdraw` cases shown above.
+2. **`ServerApi.cs`** — the `deposit`/`withdraw` routes and request records shown above; `contents`/`capacity` need nothing.
 3. **`Scenario.cs`** — add `new CargoStorage { Id = "hub-storage", Capacity = 200 }` next to the hub.
-4. **`Tests/Program.cs`** — the test shown above.
+4. **`Tests/Program.cs`** — the domain test shown above plus an HTTP case through the `StartServer` harness.
 
-No persistence edits, no engine edits, no registration list: `[GameType]` is the registration, the save codec handles the fields, and the Lua layer is the only hand-maintained surface. That is the whole extension story.
+No persistence edits, no engine edits, no registration list: `[GameType]` is the registration, the save codec handles the fields, the projection handles the reads, and hand-written routes are the only maintained surface. That is the whole extension story.

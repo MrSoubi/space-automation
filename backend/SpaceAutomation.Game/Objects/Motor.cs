@@ -4,10 +4,17 @@ namespace SpaceAutomation.Game.Objects;
 [GameType("motor")]
 public class Motor : EnergyEquipment, IConsumer
 {
-    [Observed("consumer")] public EnergyConsumer Consumer { get; set; } = new();
-    [Observed("max_speed", "Maximum speed in meters per tick.")] public double MaxSpeed { get; set; } = 3;
-    [Observed("energy_per_move", "Joules per nonzero movement tick.")] public double EnergyPerMove { get; set; } = 2;
+    [Observed("consumer")]
+    public EnergyConsumer Consumer { get; set; } = new();
+
+    [Observed("max_speed", "Maximum speed in meters per tick.")]
+    public double MaxSpeed { get; set; } = 3;
+
+    [Observed("energy_per_move", "Joules per nonzero movement tick.")]
+    public double EnergyPerMove { get; set; } = 2;
+
     internal override void InitializePort() => Energy.ConsumerId ??= Id;
+    
     public override void ValidateState()
     {
         base.ValidateState();

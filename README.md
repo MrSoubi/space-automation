@@ -2,80 +2,77 @@
 
 A Linux programming sandbox. You remotely operate a planetary expedition: machines provide the capabilities, you write the behavior that coordinates them. Inspirations: *Screeps*, *The Farmer Was Replaced*, peaceful *Factorio*.
 
-One C# process runs everything: the authoritative simulation, your Lua scripts, and a mouse-driven terminal UI.
+The game is an **HTTP API**: one C# server owns the authoritative simulation and serves it on localhost. Your automation — and any tools you build around it — is an external program in any language. The server ticks once per second and never waits for a client.
 
 ## Requirements
 
-- Linux, .NET 10 SDK, a terminal with mouse support.
+- Linux, .NET 10 SDK.
+- Any HTTP client (curl, Python, JavaScript, Rust, ...).
 
 ## Run
 
 ```bash
-./space-automation              # interactive TUI, one tick per second
+./space-automation              # start the server on 127.0.0.1:8377
 ./space-automation --paused     # start paused for inspection
+python3 player/main.py          # the reference player client
 ```
 
-The launcher builds if needed, then runs `backend/SpaceAutomation.Host`. Options:
+The launcher builds if needed, then runs `backend/SpaceAutomation.Server`. Options:
 
 | Option | Meaning |
 | --- | --- |
 | `--save path` | Save file (default `.space-automation/world-host.json`). |
-| `--script path` | Player entry point (default `player/main.lua`). |
-| `--budget n` | Lua instruction budget per `update()` (default 2000000). |
+| `--port n` | Port to serve on (default 8377, localhost only). |
 | `--paused` | Start paused. |
-| `--plain` | Line-based console instead of the TUI (also automatic when streams are redirected). |
 
-## The terminal
+The server's own terminal accepts `:pause :resume :step :save :quit`; `Ctrl+C` saves and exits. Every client — including any monitor or map you build — is an equal HTTP peer.
 
-Buttons replace commands: **Pause/Resume**, **Step** (one tick while paused), **Restart** (reload `player/main.lua`), **Quit**. The same actions work as `:pause :resume :step :restart :quit` in the input line. `Ctrl+Q` quits.
+## The API in one minute
 
-Two tabs: **Console** (game output and your results) and **Objects** (live world table). The input line evaluates Lua in the same live namespace as `main.lua`; bare expressions echo their value; `↑`/`↓` browse history.
+```bash
+B=http://127.0.0.1:8377
 
-## Player scripting
+curl $B/state                                          # {tick, running, objects:[...]}
+curl $B/objects/rover-1                                # one object's observed state
+curl $B/objects/hub/grid_status                        # {members, generation, demand, charge, capacity}
 
-The game calls `startup()` once after loading and `update(dt)` once per tick. Everything else — controllers, modules, scheduling — is yours to organize.
+curl -X POST $B/objects/rover-1/move \
+     -d '{"direction":{"x":1,"y":0},"speed":2}'        # {"accepted":true}
+curl -X POST $B/objects/rover-1/move \
+     -d '{"direction":{"x":0,"y":0},"speed":1}'        # {"accepted":false,"reason":"invalid_direction"}
 
-```lua
-function startup()
-    rover = station.get_fleet()[1]
-end
+curl -X POST $B/objects/rover-1/connect -d '{"target":"hub"}'
+curl -X POST $B/objects/rover-1/disconnect -d '{"target":"hub"}'
+curl -X POST $B/objects/rover-1/replace_component -d '{"slot":"battery","component":"spare-battery"}'
+curl -X POST $B/objects/rover-1-solar-panel/set_enabled -d '{"enabled":false}'
 
-function update(dt)
-    rover:move(vector(1, 0), rover.max_speed / 2)
-end
+curl -X POST $B/session/pause -d '{}'
+curl -X POST $B/session/resume -d '{}'
+curl -X POST $B/session/step -d '{}'                   # one tick, only while paused
+curl -X POST $B/session/save -d '{}'
 ```
 
-The interpreter shares this namespace, so you can inspect and override live:
+No `Content-Type` header is needed; `curl -d` just works.
 
-```lua
-return rover.position            -- {x=1.5, y=0}
-enabled = false                  -- variables your update() reads
+### Semantics
+
+- Every command answers synchronously with `{"accepted":true}` or `{"accepted":false,"reason":"..."}` — **completion happens over simulation time**. Reading `rover-1` right after an accepted move still shows the old position; the move resolves at the next tick.
+- Unknown object ids are `404 unknown_object`; commands the object does not support are `400 unsupported_object`; unparseable bodies are `400 invalid_body`. Well-formed but invalid gameplay values are normal rejections (`invalid_direction`, `invalid_speed`, ...).
+- The first accepted movement per rover per tick wins (`movement_already_requested`); slots reset when the tick commits.
+- `/state` reflects the world after every tick and every command. `objects` carries each object's `[Observed]` fields: `id`, `type`, `position`, `energy` (port: `connections`, `source_id`, `consumer_id`, `storage_id`), `charge`, `capacity`, `max_speed`, `enabled`, ... Filter the list client-side.
+- A connected rover cannot move (`connected_to_grid`); insufficient energy leaves it in place and sets `last_move_result` to `not_enough_energy`.
+
+### The player loop
+
+```
+read /state  ->  decide  ->  POST commands  ->  repeat
 ```
 
-A runaway script (`while true do end`) is aborted at the instruction budget, the world is unharmed, and the session pauses until you fix the script and press Restart. Errors in `update()` pause and report the traceback; the interpreter stays available for inspection.
-
-### API summary
-
-```lua
-station.get_tick()               -- completed ticks
-station.get_fleet()              -- rovers, ordered by id
-station.get_object(id)           -- proxy or nil
-station.get_objects(type?)       -- all objects, optionally filtered ("battery", ...)
-vector(x, y)                     -- position/direction value
-
-rover.position                   -- {x=..., y=...}, read live
-rover.max_speed, rover.battery.charge, rover.energy.storage_id, ...
-rover:move(direction, speed)     -- returns {accepted=true} or {accepted=false, reason="..."}
-rover:replace_component(slot, id_or_nil)
-rover:connect(id) / rover:disconnect(id) / rover:grid_status()
-panel:set_enabled(bool)
-```
-
-Command acceptance is synchronous; completion happens over simulation time. The first accepted movement per rover per tick wins; later requests are rejected as `movement_already_requested`.
+At one tick per second, a client that polls a few times per second never misses a tick — but if it does (slow code, breakpoints), the world moves on without it. There is no in-game runtime: your program is the runtime, in whatever language you like. `player/main.py` is a complete dependency-free example.
 
 ## Persistence
 
-The world autosaves every tick and on exit (atomic writes). Corrupt or unsupported saves are reported, never overwritten. Missing save files create the starter scenario; missing `player/main.lua` gets a minimal starter script (existing files are never touched).
+The world autosaves every tick and on exit (atomic writes). Corrupt or unsupported saves are reported, never overwritten. A missing save file creates the starter scenario. Restarts resume from the last tick.
 
 ## Project layout
 
@@ -83,12 +80,12 @@ The world autosaves every tick and on exit (atomic writes). Corrupt or unsupport
 | --- | --- |
 | `backend/SpaceAutomation.Game` | Authoritative domain: world, clock, rovers, energy system. No I/O. |
 | `backend/SpaceAutomation.Persistence` | Save/load: `[GameType]`/`[Observed]`/`[Saved]` metadata, JSON codec, migrations. |
-| `backend/SpaceAutomation.Host` | The application: Lua runtime (MoonSharp) with instruction budgets, game loop, Terminal.Gui TUI, plain console fallback. |
-| `backend/SpaceAutomation.Tests` | Domain, persistence, Lua API and session tests. |
-| `player/main.lua` | Your code. |
+| `backend/SpaceAutomation.Server` | The application: game loop, call channel, HTTP API on localhost. |
+| `backend/SpaceAutomation.Tests` | Domain, persistence, HTTP API and session tests. |
+| `player/main.py` | Reference client; rewrite or replace in any language. |
 | `SpaceAutomation/` | Design notes and journals. |
 
-Attributes exist only in the persistence layer; the player-facing Lua API in `SpaceAutomation.Host/LuaApi.cs` is hand-written.
+Attributes exist only in the persistence layer; reads are projected mechanically from `[Observed]` metadata, while commands are hand-written routes in `SpaceAutomation.Server/ServerApi.cs` — the same capability set for every client.
 
 ## Tests
 
@@ -98,12 +95,13 @@ just test        # or: dotnet run --project backend/SpaceAutomation.Tests
 
 ## Development
 
-Install [just](https://github.com/casey/just) once (`cargo install just`, or the installer script on that page), then:
+Install [just](https://github.com/casey/just#installation) once (`cargo install just`, or the installer script on that page), then:
 
 ```bash
 just build    # build every project
 just test     # run the test suite
-just run      # launch the game; extra arguments pass through (just run --paused)
+just run      # start the server; extra arguments pass through (just run --paused)
+just client   # run the reference client against a running server
 just clean    # remove build artifacts
 ```
 

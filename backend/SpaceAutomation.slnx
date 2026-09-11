@@ -1,6 +1,6 @@
 <Solution>
   <Project Path="SpaceAutomation.Game/SpaceAutomation.Game.csproj" />
   <Project Path="SpaceAutomation.Persistence/SpaceAutomation.Persistence.csproj" />
-  <Project Path="SpaceAutomation.Host/SpaceAutomation.Host.csproj" />
+  <Project Path="SpaceAutomation.Server/SpaceAutomation.Server.csproj" />
   <Project Path="SpaceAutomation.Tests/SpaceAutomation.Tests.csproj" />
 </Solution>

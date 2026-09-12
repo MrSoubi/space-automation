@@ -2,6 +2,7 @@
 **/bin/
 **/obj/
 __pycache__/
+venv/
 
 # Local game saves
 .space-automation/

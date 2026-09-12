@@ -126,6 +126,10 @@ class Game:
         """Start a survey scan with a scanner."""
         return self.command(f"/objects/{id}/scan")
 
+    def collect(self, id, target):
+        """Take one unit of material from a collectable object."""
+        return self.command(f"/objects/{id}/collect", {"target": target})
+
     def pause(self):
         return self.command("/session/pause")
 

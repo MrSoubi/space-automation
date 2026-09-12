@@ -221,17 +221,14 @@ public sealed class GameSession : IDisposable
 
             case SessionCommand.Pause:
                 _paused = true;
-                _print($"paused at tick {World.Tick}");
                 break;
 
             case SessionCommand.Resume:
                 _paused = false;
-                _print($"resumed at tick {World.Tick}");
                 break;
 
             case SessionCommand.Save:
                 SaveWorld("manual");
-                _print($"saved at tick {World.Tick}");
                 break;
 
             case SessionCommand.Quit:

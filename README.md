@@ -6,7 +6,7 @@ The game is an **HTTP API**: one C# server owns the authoritative simulation and
 
 ## Requirements
 
-- Linux, .NET 10 SDK.
+- Linux desktop, .NET 10 SDK, and SDL2 (`sudo apt install libsdl2-2.0-0` on Debian/Ubuntu).
 - Any HTTP client (curl, Python, JavaScript, Rust, ...).
 
 ## Run
@@ -25,7 +25,9 @@ The launcher builds if needed, then runs `backend/SpaceAutomation.Server`. Optio
 | `--port n` | Port to serve on (default 8377, localhost only). |
 | `--paused` | Start paused. |
 
-The server's own terminal accepts `:pause :resume :step :save :quit`; `Ctrl+C` saves and exits. Every client — including any monitor or map you build — is an equal HTTP peer.
+The server opens a draggable, borderless grey window at 82% opacity, containing only a flowing particle field. Blue particles move normally while the simulation runs; red particles drift at 4.5% speed while paused. Window transparency requires compositor support; otherwise the background stays opaque.
+
+Drag anywhere to move the window. **Space** pauses/resumes; **Escape** or **Alt+F4** saves and closes the window and server. `Ctrl+C` also saves and exits. There is no interactive terminal. Session controls remain available over HTTP, and every client is an equal HTTP peer.
 
 ## The API in one minute
 
@@ -41,10 +43,8 @@ curl -X POST $B/objects/rover-1/move \
 curl -X POST $B/objects/rover-1/move \
      -d '{"direction":{"x":0,"y":0},"speed":1}'        # {"accepted":false,"reason":"invalid_direction"}
 
-curl -X POST $B/objects/rover-1/connect -d '{"target":"hub"}'
-curl -X POST $B/objects/rover-1/disconnect -d '{"target":"hub"}'
-curl -X POST $B/objects/rover-1/replace_component -d '{"slot":"battery","component":"spare-battery"}'
-curl -X POST $B/objects/rover-1-solar-panel/set_enabled -d '{"enabled":false}'
+curl -X POST $B/objects/scanner-1/scan                 # survey scan, takes a few ticks
+curl -X POST $B/objects/rover-1/collect -d '{"target":"mineral-1"}'
 
 curl -X POST $B/session/pause -d '{}'
 curl -X POST $B/session/resume -d '{}'
@@ -59,8 +59,8 @@ No `Content-Type` header is needed; `curl -d` just works.
 - Every command answers synchronously with `{"accepted":true}` or `{"accepted":false,"reason":"..."}` — **completion happens over simulation time**. Reading `rover-1` right after an accepted move still shows the old position; the move resolves at the next tick.
 - Unknown object ids are `404 unknown_object`; commands the object does not support are `400 unsupported_object`; unparseable bodies are `400 invalid_body`. Well-formed but invalid gameplay values are normal rejections (`invalid_direction`, `invalid_speed`, ...).
 - The first accepted movement per rover per tick wins (`movement_already_requested`); slots reset when the tick commits.
-- `/state` reflects the world after every tick and every command. `objects` carries each object's `[Observed]` fields: `id`, `type`, `position`, `energy` (port: `connections`, `source_id`, `consumer_id`, `storage_id`), `charge`, `capacity`, `max_speed`, `enabled`, ... Filter the list client-side.
-- A connected rover cannot move (`connected_to_grid`); insufficient energy leaves it in place and sets `last_move_result` to `not_enough_energy`.
+- `/state` reflects the world after every tick and every command. `objects` carries each object's `[Observed]` fields: `id`, `type`, `position`, `speed_limit`, `stored`, `amount`, ... Filter the list client-side; undiscovered minerals are absent until a scan reveals them.
+- Collecting requires standing on the target and free cargo space (`out_of_reach`, `inventory_full`); minerals carry an `amount` that depletes, and the rover's `stored` list is its cargo. A scan in progress answers `already_scanning`.
 
 ### The player loop
 
@@ -92,7 +92,7 @@ Install [just](https://github.com/casey/just#installation) once (`cargo install 
 
 ```bash
 just build    # build every project
-just run      # start the server; extra arguments pass through (just run --paused)
+just run      # open the particle window and start the server; extra arguments pass through (just run --paused)
 just client   # run the reference client against a running server
 just clean    # remove build artifacts
 ```

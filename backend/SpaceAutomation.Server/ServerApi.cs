@@ -35,6 +35,7 @@ public static class ServerApi
         app.MapGet("/objects/{id}", (string id) => GetObject(session, id));
         app.MapPost("/objects/{id}/move", (string id, HttpContext context) => MoveRover(session, id, context));
         app.MapPost("/objects/{id}/scan", (string id) => ScanScanner(session, id));
+        app.MapPost("/objects/{id}/collect", (string id, HttpContext context) => CollectFromRover(session, id, context));
         app.MapPost("/session/pause", () => PauseSession(session));
         app.MapPost("/session/resume", () => ResumeSession(session));
         app.MapPost("/session/step", () => StepSession(session));
@@ -141,6 +142,50 @@ public static class ServerApi
         });
     }
 
+    private static async Task<IResult> CollectFromRover(GameSession session, string id, HttpContext context)
+    {
+        CollectRequest? body;
+        try
+        {
+            body = await JsonSerializer.DeserializeAsync<CollectRequest>(context.Request.Body, Json);
+        }
+        catch (JsonException)
+        {
+            return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+        }
+
+        if (body is null)
+        {
+            return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+        }
+
+        if (body.Target is null)
+        {
+            return Results.Json(CommandResult.Reject("invalid_id"), Json);
+        }
+
+        string target = body.Target;
+
+        // Look up the object and execute its command together on the game thread.
+        return await session.Call<IResult>(world =>
+        {
+            GameObject? obj = world.Find(id);
+            if (obj is null)
+            {
+                return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
+            }
+
+            Rover? rover = obj as Rover;
+            if (rover is null)
+            {
+                return Results.Json(CommandResult.Reject("unsupported_object"), Json, statusCode: 400);
+            }
+
+            CommandResult result = rover.Collect(target);
+            return Results.Json(result, Json);
+        });
+    }
+
     private static IResult PauseSession(GameSession session)
     {
         session.Pause();
@@ -171,3 +216,5 @@ public static class ServerApi
 public sealed record VectorBody(float? X, float? Y);
 
 public sealed record MoveRequest(VectorBody? Direction, float? Speed);
+
+public sealed record CollectRequest(string? Target);

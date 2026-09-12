@@ -1,4 +1,5 @@
 namespace SpaceAutomation.Game.Vehicles;
+
 using System.Numerics;
 
 [GameType("rover")]
@@ -12,8 +13,18 @@ public class Rover : GameObject, IMovable
 
     [Saved("_movement")]
     public Vector2? PendingMovement { get; private set; }
-
     public bool HasPendingMovement => PendingMovement is not null;
+
+    [Saved("_collect")]
+    public string? PendingCollect { get; private set; }
+    public bool HasPendingCollect => PendingCollect is not null;
+
+    [Observed("capacity", "Cargo slots on board.")]
+    public int Capacity { get; set; } = 5;
+
+    [Observed("stored")]
+    public List<string> Stored { get; private set; } = [];
+
 
     public CommandResult Move(Vector2 direction, float speed)
     {
@@ -37,16 +48,35 @@ public class Rover : GameObject, IMovable
         return CommandResult.Ok();
     }
 
-    public CommandResult Collect(string id){
-        if (World.Find(id) is not ICollectable collectable)
+    // Collecting works like moving: the command only validates and stores the
+    // intent — Update() takes the material on the next tick.
+    public CommandResult Collect(string id)
+    {
+        if (PendingCollect is not null)
+        {
+            return CommandResult.Reject("collect_already_requested");
+        }
+
+        GameObject? target = World.Find(id);
+
+        // "is not ICollectable" without a variable is a guard clause: nothing
+        // to call, just reject.
+        if (target is not ICollectable)
         {
             return CommandResult.Reject("invalid_id");
         }
 
-        // To be done in Update !
-        // Check available space in rover's inventory
-        collectable.Collect();
-        // Add it to the rover's inventory
+        if (target.Position != Position)
+        {
+            return CommandResult.Reject("out_of_reach");
+        }
+
+        if (Stored.Count >= Capacity)
+        {
+            return CommandResult.Reject("inventory_full");
+        }
+
+        PendingCollect = id;
 
         return CommandResult.Ok();
     }
@@ -59,10 +89,29 @@ public class Rover : GameObject, IMovable
             Position += movement;
             PendingMovement = null;
         }
+
+        if (PendingCollect is not null)
+        {
+            // "is ICollectable collectable" matches and binds in one step:
+            // the object exists, it is collectable, and it is safe to call.
+            if (World.Find(PendingCollect) is ICollectable collectable)
+            {
+                if (collectable.Collect())
+                {
+                    Stored.Add(PendingCollect);
+                }
+            }
+
+            PendingCollect = null;
+        }
     }
 
     public override void ValidateState()
     {
         base.ValidateState();
+
+        Rules.Require(Capacity > 0, "Cargo capacity must be positive");
+        Rules.Require(Stored.Count <= Capacity, "Cargo exceeds capacity");
+        Rules.Require(PendingCollect is null || PendingCollect.Length > 0, "Invalid pending collect");
     }
 }

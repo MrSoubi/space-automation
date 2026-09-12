@@ -8,9 +8,9 @@ default:
 build:
     dotnet build backend/SpaceAutomation.sln
 
-# Start the simulation server; extra arguments pass through (e.g. just run --paused)
+# Open the particle window and start the simulation server; extra arguments pass through (e.g. just run --paused)
 run *args:
-    dotnet run --project backend/SpaceAutomation.Server -- {{args}}
+    @dotnet run --project backend/SpaceAutomation.Server -- {{args}}
 
 # Run the reference player client against a running server
 client:

@@ -2,11 +2,6 @@ using SpaceAutomation.Game;
 using SpaceAutomation.Persistence;
 using SpaceAutomation.Server;
 
-// Entry point: the simulation runs as an HTTP service on localhost. The game
-// gives players nothing but this API — automation and tools are external
-// programs in any language, polling state and submitting commands. The server
-// never waits for a client; ticks fire on their own schedule.
-
 try
 {
     // The default save lives in the player's home directory so that every way
@@ -72,68 +67,26 @@ try
         Console.WriteLine($"kept it as {backup} and started a fresh expedition");
     }
 
-    var session = new GameSession(world, save, Console.WriteLine, paused);
+    using var window = new ParticleWindow();
+    using var session = new GameSession(world, save, Console.Error.WriteLine, paused);
     var app = ServerApi.Build(session, port);
 
-    session.Start();
-    StartOpsConsole(session);
-
-    Console.WriteLine($"space automation server — tick {world.Tick}, {world.Objects.Count} objects — http://127.0.0.1:{port}");
-    Console.WriteLine($"save: {save}");
-    Console.WriteLine("controls: :pause :resume :step :save :quit — or POST /session/... from any client");
-
-    app.Run(); // Ctrl+C: graceful shutdown, then the session saves on dispose
-    session.Dispose();
+    try
+    {
+        // Keep SDL on the main thread; HTTP and simulation run independently.
+        app.StartAsync().GetAwaiter().GetResult();
+        session.Start();
+        window.Run(session, app.Lifetime.ApplicationStopping);
+    }
+    finally
+    {
+        app.StopAsync().GetAwaiter().GetResult();
+        app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
     return 0;
 }
 catch (Exception e)
 {
     Console.Error.WriteLine(e.Message);
     return 1;
-}
-
-// A tiny operator console for the terminal the server was started in. Without
-// a client connected you can still pause, step, save and quit.
-static void StartOpsConsole(GameSession session)
-{
-    if (Console.IsInputRedirected)
-    {
-        return; // service mode: no operator at a terminal
-    }
-
-    new Thread(() =>
-    {
-        while (true)
-        {
-            var line = Console.ReadLine();
-            if (line is null)
-            {
-                break;
-            }
-
-            switch (line.Trim())
-            {
-                case ":pause":
-                    session.Pause();
-                    break;
-                case ":resume":
-                    session.Resume();
-                    break;
-                case ":step":
-                    session.Step();
-                    break;
-                case ":save":
-                    session.Save();
-                    break;
-                case ":quit":
-                    session.Quit();
-                    break;
-                case "":
-                    break;
-                default:
-                    Console.WriteLine("unknown control; available: :pause :resume :step :save :quit");
-                    break;
-            }
-        }
-    }) { IsBackground = true, Name = "ops" }.Start();
 }

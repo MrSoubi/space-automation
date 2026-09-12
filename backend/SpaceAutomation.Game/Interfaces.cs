@@ -15,7 +15,9 @@ public interface IScanable
     void Reveal();
 }
 
+// Anything the rover can take material from. Collect() reports whether
+// anything was actually taken — a depleted site changes nothing.
 public interface ICollectable
 {
-    void Collect();
+    bool Collect();
 }

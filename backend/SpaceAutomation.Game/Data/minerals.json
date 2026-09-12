@@ -1,0 +1,44 @@
+{
+    "minerals": [
+        {
+            "id": "quartz",
+            "name": "Quartz",
+            "class": "Oxydes",
+            "density": 2.56,
+            "color": "transparent white",
+            "hardness": 7,
+            "composition": {
+                "Si": 46.74,
+                "O": 53.26
+            }
+        },
+        {
+            "id": "sinjarite",
+            "name": "Sinjarite",
+            "class": "Halides",
+            "density": 1.81,
+            "color": "light pink",
+            "hardness": 1.5,
+            "composition": {
+                "Ca": 27.26,
+                "H": 2.74,
+                "Cl": 48.23,
+                "O": 21.77
+            }
+        },
+        {
+            "id": "borax",
+            "name": "Borax",
+            "class": "Borates",
+            "density": 1.71,
+            "color": "blue",
+            "hardness": 2,
+            "composition": {
+                    "Na": 12.06,
+                    "B": 11.34,
+                    "H": 5.29,
+                    "O": 71.32
+                }
+        }
+    ]
+}

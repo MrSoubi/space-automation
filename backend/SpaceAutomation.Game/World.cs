@@ -1,5 +1,7 @@
 namespace SpaceAutomation.Game;
 
+using SpaceAutomation.Game.Resources;
+
 // The world is the collection of game objects plus a tick counter. Objects
 // enter only through Add (validated and attached); every Advance() runs one
 // simulation tick over all of them.
@@ -9,24 +11,44 @@ public sealed class World
     // or language rules, whatever the computer's culture happens to be.
     private readonly Dictionary<string, GameObject> _objects = new(StringComparer.Ordinal);
 
+    // Mineral data ids whose definition the expedition has analyzed. Knowledge
+    // is world-wide, not per object: once a type is known, every node and
+    // sample of it shows its data.
+    private readonly HashSet<string> _knownMinerals = new(StringComparer.Ordinal);
+
     // A read-only view for everyone else: outside code can look objects up,
     // but only Add() can put them in.
     public IReadOnlyDictionary<string, GameObject> Objects => _objects;
 
+    public IReadOnlyCollection<string> KnownMinerals => _knownMinerals;
+
     // Completed simulation ticks.
     public long Tick { get; private set; }
 
-    public World(IEnumerable<GameObject> objects, long tick = 0)
+    public World(IEnumerable<GameObject> objects, long tick = 0, IEnumerable<string>? knownMinerals = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
 
         Tick = tick;
+
+        if (knownMinerals is not null)
+        {
+            foreach (string id in knownMinerals)
+            {
+                _knownMinerals.Add(id);
+            }
+        }
 
         foreach (var obj in objects)
         {
             Add(obj);
         }
     }
+
+    public bool Knows(string dataKey) => _knownMinerals.Contains(dataKey);
+
+    // Analysis calls this; learning twice changes nothing.
+    public void Learn(string dataKey) => _knownMinerals.Add(dataKey);
 
     public void Add(GameObject obj)
     {
@@ -51,6 +73,11 @@ public sealed class World
         foreach (var obj in _objects.Values)
         {
             obj.ValidateState();
+        }
+
+        foreach (string id in _knownMinerals)
+        {
+            Rules.Require(MineralCatalog.Contains(id), $"Unknown known-mineral: {id}");
         }
     }
 

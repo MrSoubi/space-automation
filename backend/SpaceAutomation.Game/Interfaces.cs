@@ -15,9 +15,17 @@ public interface IScanable
     void Reveal();
 }
 
-// Anything the rover can take material from. Collect() reports whether
-// anything was actually taken — a depleted site changes nothing.
+// Anything the rover can take material from. A scoop takes a fixed volume;
+// Collect(volume) reports whether the full scoop was actually taken — a
+// near-empty site changes nothing. Volume is what remains on site, and
+// Density (kilograms per litre) feeds the rover's cargo weight checks.
 public interface ICollectable
 {
-    bool Collect();
+    float Volume { get; }
+
+    float Density { get; }
+
+    string DataKey { get; }
+
+    bool Collect(float volume);
 }

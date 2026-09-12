@@ -23,7 +23,13 @@ public static class WorldStore
             objects.Add(new JsonObject { ["type"] = Model.ObjectKey(obj), ["state"] = state });
         }
 
-        return new JsonObject { ["version"] = 4, ["tick"] = world.Tick, ["objects"] = objects };
+        var known = new JsonArray();
+        foreach (string id in world.KnownMinerals.OrderBy(id => id, StringComparer.Ordinal))
+        {
+            known.Add(id);
+        }
+
+        return new JsonObject { ["version"] = 5, ["tick"] = world.Tick, ["known"] = known, ["objects"] = objects };
     }
 
     public static World Deserialize(JsonObject input)
@@ -42,7 +48,19 @@ public static class WorldStore
             throw new InvalidDataException("Save needs an objects array");
         }
 
-        var world = new World([], tick: tick);
+        var known = new List<string>();
+        if (state["known"] is JsonArray knownArray)
+        {
+            foreach (var item in knownArray)
+            {
+                if (item is not null)
+                {
+                    known.Add(item.GetValue<string>());
+                }
+            }
+        }
+
+        var world = new World([], tick: tick, knownMinerals: known);
         foreach (var item in objects)
         {
             var record = item as JsonObject;

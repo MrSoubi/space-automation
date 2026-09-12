@@ -42,6 +42,10 @@ public abstract class GameObject
     // an undiscovered mineral, for example, stays hidden until a scan finds it.
     public virtual bool IsPlayerVisible => true;
 
+    // Last-chance hook for the projected fields. Objects with secrets adjust
+    // them here — a mineral hides its data until its type has been analyzed.
+    public virtual void AdjustObservation(Dictionary<string, object?> fields) { }
+
     public virtual void ValidateState()
     {
         Rules.Require(!string.IsNullOrWhiteSpace(Id), "Object needs an id");

@@ -45,6 +45,8 @@ curl -X POST $B/objects/rover-1/move \
 
 curl -X POST $B/objects/scanner-1/scan                 # survey scan, takes a few ticks
 curl -X POST $B/objects/rover-1/collect -d '{"target":"mineral-1"}'
+curl -X POST $B/objects/rover-1/deliver -d '{"sample":"sample-rover-1-1","target":"facility-1"}'
+curl -X POST $B/objects/facility-1/analyze             # consumes the sample, reveals its type
 
 curl -X POST $B/session/pause -d '{}'
 curl -X POST $B/session/resume -d '{}'
@@ -59,8 +61,9 @@ No `Content-Type` header is needed; `curl -d` just works.
 - Every command answers synchronously with `{"accepted":true}` or `{"accepted":false,"reason":"..."}` — **completion happens over simulation time**. Reading `rover-1` right after an accepted move still shows the old position; the move resolves at the next tick.
 - Unknown object ids are `404 unknown_object`; commands the object does not support are `400 unsupported_object`; unparseable bodies are `400 invalid_body`. Well-formed but invalid gameplay values are normal rejections (`invalid_direction`, `invalid_speed`, ...).
 - The first accepted movement per rover per tick wins (`movement_already_requested`); slots reset when the tick commits.
-- `/state` reflects the world after every tick and every command. `objects` carries each object's `[Observed]` fields: `id`, `type`, `position`, `speed_limit`, `stored`, `amount`, ... Filter the list client-side; undiscovered minerals are absent until a scan reveals them.
-- Collecting requires standing on the target and free cargo space (`out_of_reach`, `inventory_full`); minerals carry an `amount` that depletes, and the rover's `stored` list is its cargo. A scan in progress answers `already_scanning`.
+- `/state` reflects the world after every tick and every command. `objects` carries each object's `[Observed]` fields: `id`, `type`, `position`, `speed_limit`, `stored`, `used_volume`, `used_weight`, `volume`, `identified`, ... Filter the list client-side; undiscovered minerals are absent until a scan reveals them.
+- A scan finds mineral *nodes* — a location, nothing more. Collecting requires standing on the node and free cargo space (`out_of_reach`, `empty`, `inventory_full`, `overloaded`): each scoop takes a fixed volume (1 L) and weighs its volume times the mineral's density. Cargo holds at most 5 L and 10 kg; `stored` lists samples with `volume` and measured `weight`.
+- A sample's mineral definition is hidden until one sample of that type is delivered to the analysis facility and analyzed — which consumes it and reveals the type for every node and sample of that kind, forever.
 
 ### The player loop
 
@@ -101,4 +104,4 @@ The equivalent `dotnet` commands are in the `justfile`. To add equipment, system
 
 ## Save format history
 
-Version 4 (current). Version-3 saves (rovers carrying a meaningless `installed_in`) are upgraded in memory on load.
+Version 5 (current): mineral nodes carry litres, rovers carry sample records, and the save tracks which mineral types the expedition has analyzed. Version 4 saves (integer units, cargo as node ids) and version-3 saves (rovers carrying a meaningless `installed_in`) are upgraded in memory on load.

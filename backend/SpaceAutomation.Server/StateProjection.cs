@@ -41,6 +41,8 @@ public static class StateProjection
             result[Model.Name(property)] = Encode(property.GetValue(obj));
         }
 
+        // Objects with secrets (minerals and their samples) adjust the fields.
+        obj.AdjustObservation(result);
         return result;
     }
 

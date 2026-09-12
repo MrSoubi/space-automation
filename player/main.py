@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
-"""Space Automation player script with Textual TUI dashboard."""
+"""Space Automation player script with Textual TUI dashboard.
+
+The full gameplay loop: scan finds mineral *nodes* (locations only — no
+mineral data), collecting brings unknown samples on board, delivery hands
+them to the analysis facility, and analysis consumes a sample to reveal its
+mineral definition. From then on every node and sample of that type shows
+its data without being analyzed again.
+"""
 
 import math
+
 from api import Game
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, DataTable, Digits, Static
+
+# How close the rover must be to count as standing on something.
+REACH = 0.1
+
+
+def distance(a, b):
+    return math.hypot(b.x - a.x, b.y - a.y)
 
 
 class RoverDashboard(App):
@@ -37,75 +52,85 @@ class RoverDashboard(App):
     def on_mount(self) -> None:
         """Initialize table columns and trigger the update interval."""
         table = self.query_one("#rover_table", DataTable)
-        table.add_columns("ID", "Position (X, Y)", "Speed Limit", "Cargo Stored", "Last Collect Result")
-
-        # Run tick update 10 times per second
+        table.add_columns("ID", "Position (X, Y)", "Speed Limit", "Cargo (volume / weight)", "Last Collect Result")
         self.set_interval(0.1, self.game_tick)
 
     def game_tick(self) -> None:
         """Refresh game state, run player logic, and update Textual display."""
         state = self.game.refresh()
-
-        # Update tick display
         self.query_one("#tick_display", Digits).update(str(state["tick"]))
 
-        # Execute rover automation logic
         self.update_game_logic()
 
-        # Render rovers in the DataTable
         table = self.query_one("#rover_table", DataTable)
         table.clear()
-
-        # game.objects("rover") returns Obj instances from api.py
-        rovers = self.game.objects("rover")
-
-        for rover in rovers:
+        for rover in self.game.objects("rover"):
             pos_str = f"({rover.position.x:.1f}, {rover.position.y:.1f})"
-            
-            # Safely check optional attributes using getattr or Obj's getattr handling
-            speed = getattr(rover, "speed_limit", "N/A")
-            stored = getattr(rover, "stored", 0)
-            last_collect = getattr(rover, "last_collect_result", None) or "Idle"
-
-            table.add_row(
-                str(rover.id),
-                pos_str,
-                str(speed),
-                str(stored),
-                str(last_collect)
-            )
+            stored = getattr(rover, "stored", [])
+            cargo = f"{getattr(rover, 'used_volume', 0):.1f} L / {getattr(rover, 'used_weight', 0):.2f} kg"
+            last = getattr(rover, "last_collect_result", None) or "Idle"
+            table.add_row(str(rover.id), pos_str, str(rover.speed_limit), cargo, str(last))
 
     def update_game_logic(self) -> None:
-        """Game automation logic driving rover-1 to minerals."""
+        """Automation: scan, collect, deliver, analyze — in that order."""
         rover = self.game.object("rover-1")
         scanner = self.game.object("scanner-1")
-
-        if rover is None or scanner is None:
+        facility = self.game.object("facility-1")
+        if rover is None or scanner is None or facility is None:
             return
 
-        # Phase 1: Survey sector
+        # Phase 1: survey the sector once, then wait for the scan to finish.
         if not scanner.scanned:
             if scanner.ticks_remaining == 0:
                 self.game.scan(scanner.id)
             return
 
-        # Phase 2: Drive to mineral site
+        # Phase 2: run the analysis whenever a sample is waiting and idle.
+        sample = facility.sample
+        if sample is not None and facility.ticks_remaining == 0 and not sample.get("identified", False):
+            self.game.analyze(facility.id)
+            return
+
+        # Phase 3: keep collecting while the cargo can still grow; once a
+        # rejection says otherwise, drive to the facility and deliver.
+        if self._can_collect(rover):
+            self._collect_step(rover)
+        elif rover.stored:
+            self._deliver_step(rover, facility)
+
+    def _can_collect(self, rover) -> bool:
+        return rover.last_collect_result not in ("inventory_full", "overloaded", "empty")
+
+    def _collect_step(self, rover) -> None:
         minerals = self.game.objects("mineral")
         if not minerals:
             return
 
         target = minerals[0]
-        offset = (target.position.x - rover.position.x, target.position.y - rover.position.y)
-        distance = math.hypot(*offset)
-
-        if distance <= 0.5:
-            if target.amount > 0 and (rover.last_collect_result is None or rover.last_collect_result == "collected"):
-                self.game.collect(rover.id, target.id)
+        if distance(rover.position, target.position) > REACH:
+            self._move_to(rover, target.position)
             return
 
-        direction = (offset[0] / distance, offset[1] / distance)
-        speed = min(rover.speed_limit, distance)
-        self.game.move(rover.id, direction, speed)
+        self.game.collect(rover.id, target.id)
+
+    def _deliver_step(self, rover, facility) -> None:
+        if facility.sample is not None:
+            return  # busy: wait for the analysis to finish
+
+        if distance(rover.position, facility.position) > REACH:
+            self._move_to(rover, facility.position)
+            return
+
+        self.game.deliver(rover.id, rover.stored[0]["id"], facility.id)
+
+    def _move_to(self, rover, target) -> None:
+        offset = (target.x - rover.position.x, target.y - rover.position.y)
+        dist = math.hypot(*offset)
+        if dist <= REACH:
+            return
+
+        direction = (offset[0] / dist, offset[1] / dist)
+        self.game.move(rover.id, direction, min(rover.speed_limit, dist))
 
 
 def main():

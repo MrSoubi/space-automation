@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SpaceAutomation.Game;
+using SpaceAutomation.Game.Buildings;
 using SpaceAutomation.Game.Items;
 using SpaceAutomation.Game.Vehicles;
 using System.Numerics;
@@ -36,6 +37,8 @@ public static class ServerApi
         app.MapPost("/objects/{id}/move", (string id, HttpContext context) => MoveRover(session, id, context));
         app.MapPost("/objects/{id}/scan", (string id) => ScanScanner(session, id));
         app.MapPost("/objects/{id}/collect", (string id, HttpContext context) => CollectFromRover(session, id, context));
+        app.MapPost("/objects/{id}/deliver", (string id, HttpContext context) => DeliverFromRover(session, id, context));
+        app.MapPost("/objects/{id}/analyze", (string id) => AnalyzeAtFacility(session, id));
         app.MapPost("/session/pause", () => PauseSession(session));
         app.MapPost("/session/resume", () => ResumeSession(session));
         app.MapPost("/session/step", () => StepSession(session));
@@ -186,6 +189,73 @@ public static class ServerApi
         });
     }
 
+    private static async Task<IResult> DeliverFromRover(GameSession session, string id, HttpContext context)
+    {
+        DeliverRequest? body;
+        try
+        {
+            body = await JsonSerializer.DeserializeAsync<DeliverRequest>(context.Request.Body, Json);
+        }
+        catch (JsonException)
+        {
+            return Results.Json(CommandResult.Reject("invalid_body"), Json, statusCode: 400);
+        }
+
+        if (body is null || body.Sample is null)
+        {
+            return Results.Json(CommandResult.Reject("invalid_sample"), Json);
+        }
+
+        if (body.Target is null)
+        {
+            return Results.Json(CommandResult.Reject("invalid_target"), Json);
+        }
+
+        string sample = body.Sample;
+        string target = body.Target;
+
+        // Look up the object and execute its command together on the game thread.
+        return await session.Call<IResult>(world =>
+        {
+            GameObject? obj = world.Find(id);
+            if (obj is null)
+            {
+                return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
+            }
+
+            Rover? rover = obj as Rover;
+            if (rover is null)
+            {
+                return Results.Json(CommandResult.Reject("unsupported_object"), Json, statusCode: 400);
+            }
+
+            CommandResult result = rover.Deliver(sample, target);
+            return Results.Json(result, Json);
+        });
+    }
+
+    private static async Task<IResult> AnalyzeAtFacility(GameSession session, string id)
+    {
+        // Look up the object and execute its command together on the game thread.
+        return await session.Call<IResult>(world =>
+        {
+            GameObject? obj = world.Find(id);
+            if (obj is null)
+            {
+                return Results.Json(CommandResult.Reject("unknown_object"), Json, statusCode: 404);
+            }
+
+            AnalysisFacility? facility = obj as AnalysisFacility;
+            if (facility is null)
+            {
+                return Results.Json(CommandResult.Reject("unsupported_object"), Json, statusCode: 400);
+            }
+
+            CommandResult result = facility.Analyze();
+            return Results.Json(result, Json);
+        });
+    }
+
     private static IResult PauseSession(GameSession session)
     {
         session.Pause();
@@ -218,3 +288,5 @@ public sealed record VectorBody(float? X, float? Y);
 public sealed record MoveRequest(VectorBody? Direction, float? Speed);
 
 public sealed record CollectRequest(string? Target);
+
+public sealed record DeliverRequest(string? Sample, string? Target);

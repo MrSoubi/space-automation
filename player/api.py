@@ -127,8 +127,16 @@ class Game:
         return self.command(f"/objects/{id}/scan")
 
     def collect(self, id, target):
-        """Take one unit of material from a collectable object."""
+        """Take one scoop (a fixed volume) from a collectable object."""
         return self.command(f"/objects/{id}/collect", {"target": target})
+
+    def deliver(self, id, sample, target):
+        """Hand a cargo sample to another object, e.g. an analysis facility."""
+        return self.command(f"/objects/{id}/deliver", {"sample": sample, "target": target})
+
+    def analyze(self, id):
+        """Start analyzing the sample waiting in an analysis facility."""
+        return self.command(f"/objects/{id}/analyze")
 
     def pause(self):
         return self.command("/session/pause")
